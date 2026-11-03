@@ -1,0 +1,25 @@
+name: Windows 检查
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: windows-latest
+    env:
+      CARGO_BUILD_JOBS: 1
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 Rust stable
+        run: rustup toolchain install stable --profile minimal
+      - name: 测试
+        run: cargo +stable test --locked --all-targets --features record -- --test-threads=1
+      - name: 检查安装脚本语法
+        shell: pwsh
+        run: |
+          Get-ChildItem installer,scripts -Filter *.ps1 -Recurse | ForEach-Object {
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName,[ref]$null,[ref]$parseErrors) | Out-Null
+            if ($parseErrors) { throw ($parseErrors | Out-String) }
+          }
