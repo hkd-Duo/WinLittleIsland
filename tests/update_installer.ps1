@@ -20,7 +20,8 @@ try {
     $data = Join-Path $targetDir 'settings.json'
     Set-Content -LiteralPath $data -Value 'keep-user-data'
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    foreach ($case in @('success','bad-hash','wrong-version','traversal')) {
+    foreach ($case in @('success','inherited-shell','bad-hash','wrong-version','traversal')) {
+        Remove-Item -LiteralPath (Join-Path $targetDir 'started.txt') -ErrorAction SilentlyContinue
         Set-Content -LiteralPath $target -Value 'previous-program'
         $before = (Get-FileHash -LiteralPath $target).Hash
         $work = Join-Path $env:LOCALAPPDATA ('Daozai\Updates\' + $case)
@@ -34,14 +35,29 @@ try {
         Set-Content -LiteralPath (Join-Path $work 'version.txt') -Value $version
         $hash = if ($case -eq 'bad-hash') {'a' * 64} else {(Get-FileHash -LiteralPath $archive).Hash}
         Set-Content -LiteralPath (Join-Path $work 'hash.txt') -Value $hash
-        & (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer -WorkPath $work -TargetExe $target -ParentProcessId 0
-        if ($case -eq 'success') {
-            if ($LASTEXITCODE -ne 0) { throw '更新安装失败' }
+        $shell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        if ($case -eq 'inherited-shell') {
+            # 模拟应用继承 PowerShell 7 的模块路径，绕过交互式 shell 对子进程环境的自动修正。
+            $start = [Diagnostics.ProcessStartInfo]::new($shell)
+            $start.UseShellExecute = $false
+            $start.CreateNoWindow = $true
+            $start.EnvironmentVariables['PSModulePath'] = $env:PSModulePath
+            $start.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$installer`" -WorkPath `"$work`" -TargetExe `"$target`" -ParentProcessId 0"
+            $process = [Diagnostics.Process]::Start($start)
+            if (-not $process.WaitForExit(30000)) { throw '继承终端环境的更新测试超时' }
+            $code = $process.ExitCode
+            $process.Dispose()
+        } else {
+            & $shell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer -WorkPath $work -TargetExe $target -ParentProcessId 0
+            $code = $LASTEXITCODE
+        }
+        if ($case -in @('success','inherited-shell')) {
+            if ($code -ne 0) { throw "更新安装失败：$case" }
             if ((Get-FileHash -LiteralPath $target).Hash -ne (Get-FileHash -LiteralPath $fixture).Hash) { throw '未替换为新版程序' }
             for ($attempt=0; $attempt -lt 50 -and -not (Test-Path -LiteralPath (Join-Path $targetDir 'started.txt')); $attempt++) { Start-Sleep -Milliseconds 100 }
             if (-not (Test-Path -LiteralPath (Join-Path $targetDir 'started.txt'))) { throw '更新后没有重启' }
         } else {
-            if ($LASTEXITCODE -eq 0 -or -not (Test-Path -LiteralPath (Join-Path $work 'error.txt'))) { throw "未拒绝无效更新：$case" }
+            if ($code -eq 0 -or -not (Test-Path -LiteralPath (Join-Path $work 'error.txt'))) { throw "未拒绝无效更新：$case" }
             if ((Get-FileHash -LiteralPath $target).Hash -ne $before) { throw '无效更新修改了原程序' }
         }
         if ((Get-Content -LiteralPath $data -Raw).Trim() -ne 'keep-user-data') { throw '用户数据被修改' }

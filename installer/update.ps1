@@ -1,5 +1,7 @@
 param([Parameter(Mandatory=$true)][string]$WorkPath, [Parameter(Mandatory=$true)][string]$TargetExe, [int]$ParentProcessId)
 $ErrorActionPreference = 'Stop'
+# 更新只使用当前 PowerShell 自带模块，避免继承其他终端版本的模块路径。
+$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
 $cacheRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Daozai\Updates')).TrimEnd('\')
 $workRoot = [IO.Path]::GetFullPath($WorkPath).TrimEnd('\')
 $target = [IO.Path]::GetFullPath($TargetExe)
