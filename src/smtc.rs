@@ -1,6 +1,10 @@
 //! 系统媒体会话（SMTC）读取：Windows 10/11 的“正在播放”。
 //! 与原工具使用同一套 API（GlobalSystemMediaTransportControlsSessionManager）。
 
+#[cfg(windows)]
+#[path="netease_timeline.rs"]
+mod netease_timeline;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -145,6 +149,16 @@ fn query(artwork:&mut ArtworkCache) -> Option<NowPlaying> {
         }
     }
     let source=session.SourceAppUserModelId().map(|s|s.to_string()).unwrap_or_default();
+    if source.eq_ignore_ascii_case("cloudmusic.exe") && duration<=0.0 {
+        if let Some((current,total))=netease_timeline::timeline() {
+            position=current;duration=total;sampled_at=Some(std::time::Instant::now());
+        }
+    }
+    if source.to_ascii_lowercase().contains("kugou") && duration<=0.0 {
+        if let Some(current)=netease_timeline::kugou_position() {
+            position=current;sampled_at=Some(std::time::Instant::now());
+        }
+    }
     let album=props.AlbumTitle().map(|s|s.to_string()).unwrap_or_default();
     let key=format!("{source}|{title}|{artist}|{album}");
     let artwork=artwork.get(key,||read_artwork(&props));

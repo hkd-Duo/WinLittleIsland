@@ -94,6 +94,45 @@ pub fn from_plain(raw: &str) -> Lyrics {
     Lyrics { lines, synced: false }
 }
 
+#[path="soda_cache.rs"]
+mod soda_cache;
+
+pub fn is_soda(source:&str)->bool {source=="汽水音乐" || source.to_ascii_lowercase().contains("sodamusic")}
+
+/// 原生缓存优先；未缓存的新歌仍可使用已有在线来源。
+pub fn fetch_for_source(source:&str,track:&str,artist:&str,duration:f64)->Result<Lyrics,FetchError> {
+    if is_soda(source) {
+        if let Some(raw)=soda_cache::read(track,artist,duration) {
+            let lyrics=parse_soda(&raw);
+            if lyrics.synced {return Ok(lyrics);}
+        }
+    }
+    fetch(track,artist,duration)
+}
+
+fn parse_soda(raw:&str)->Lyrics {
+    let line_tag=regex::Regex::new(r"^\[(\d+),(\d+)\]").unwrap();
+    let word_tag=regex::Regex::new(r"<\d+,\d+,\d+>").unwrap();
+    let mut timed=Vec::new();
+    for line in raw.lines() {
+        let Some(c)=line_tag.captures(line) else{continue;};
+        let (Ok(start),Ok(length))=(c[1].parse::<u32>(),c[2].parse::<u32>()) else{continue;};
+        let Some(end)=start.checked_add(length).filter(|end|*end<=86_400_000) else{continue;};
+        let text=word_tag.replace_all(&line[c.get(0).unwrap().end()..],"").trim().to_string();
+        timed.push((start,end,text));
+    }
+    if timed.is_empty(){return parse_lrc(raw);}
+    timed.sort_by_key(|line|line.0);
+    let mut lines=Vec::new();
+    for (i,(start,end,text)) in timed.iter().enumerate() {
+        lines.push(LyricsLine{t:*start as f32/1000.0,text:text.clone()});
+        if end>start && timed.get(i+1).is_none_or(|next|*end<next.0) {
+            lines.push(LyricsLine{t:*end as f32/1000.0,text:String::new()});
+        }
+    }
+    Lyrics{synced:lines.iter().any(|line|!line.text.is_empty()),lines}
+}
+
 pub fn fetch(track: &str, artist: &str, duration_secs: f64) -> Result<Lyrics, FetchError> {
     if track.trim().is_empty() || artist.trim().is_empty(){return Err(FetchError::IncompleteMetadata);}
     let path=cache_path(track,artist,duration_secs);
@@ -254,6 +293,20 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn soda_krc_preserves_real_timing_and_instrumental_gaps() {
+        let l=parse_soda("[25378,4523]<0,202,0>孤<202,201,0>单\n[30938,5563]<0,202,0>身<202,201,0>边");
+        assert!(l.synced);
+        assert!((l.lines[0].t-25.378).abs()<0.001);
+        assert_eq!(l.lines[0].text,"孤单");
+        assert_eq!(l.lines[l.index_at(30.0).unwrap()].text,"");
+        assert_eq!(l.lines[l.index_at(31.0).unwrap()].text,"身边");
+        assert!(!parse_soda("[bad,10]<0,10,0>错").synced);
+        assert!(!parse_soda("纯文本歌词").synced);
+        assert_eq!(parse_soda("[00:01.20]正文").lines[0].text,"正文");
+    }
+
 
     #[test]
     #[ignore="需要实际访问外部歌词服务"]

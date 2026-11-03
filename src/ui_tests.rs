@@ -6,6 +6,29 @@ use std::sync::Mutex;
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn switching_music_source_discards_previous_lyrics() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.media=crate::smtc::NowPlaying{source:"cloudmusic.exe".into(),title:"Track".into(),artist:"Artist".into(),duration:120.0,..Default::default()};
+    h.frame(vec![]);
+    h.app.set_lyrics("Track","Artist",120.0,crate::lyrics::parse_lrc("[00:01]旧来源歌词"));
+    h.media.source="汽水音乐".into();
+    h.frame(vec![]);
+    assert!(h.app.ly.lyrics.is_none(),"同一首歌切换播放器后必须重新选择歌词来源");
+}
+
+#[test]
+fn settings_keep_dark_buttons_when_system_theme_changes() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let h=H::new();
+    for theme in [egui::Theme::Light,egui::Theme::Dark,egui::Theme::Light] {
+        let _=h.ctx.run(egui::RawInput{system_theme:Some(theme),..Default::default()},|ctx| {
+            assert!(ctx.style().visuals.widgets.inactive.weak_bg_fill.r()<100,"系统浅色模式不能把深色设置里的按钮变成白底");
+        });
+    }
+}
+
+#[test]
 fn expanded_settings_routes_preserve_inline_controls(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for (page,tab) in [1,2,3,5,4,7,11,8].into_iter().enumerate(){
@@ -371,6 +394,17 @@ fn delayed_media_samples_keep_the_live_position_and_follow_pause_and_seek(){
 }
 
 #[test]
+fn kugou_position_advances_without_duration_and_respects_pause_and_seek(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.media=crate::smtc::NowPlaying{source:"kugou".into(),title:"Track".into(),artist:"Artist".into(),position:42.0,duration:0.0,playing:true,sampled_at:Some(std::time::Instant::now()-std::time::Duration::from_millis(600)),..Default::default()};
+    h.frame(vec![]);
+    assert!(h.app.media.position>=42.59,"未知总时长不能阻止真实进度外推");
+    h.media.playing=false;h.frame(vec![]);assert_eq!(h.app.media.position,42.0);
+    h.media.playing=true;h.media.position=12.0;h.media.sampled_at=Some(std::time::Instant::now());h.frame(vec![]);
+    assert!((12.0..12.2).contains(&h.app.media.position),"拖动后必须跟随新的实际位置");
+}
+
+#[test]
 fn music_speaker_button_toggles_mute(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
@@ -469,6 +503,82 @@ fn music_lyrics_island_toggle_is_independent_and_persistent() {
     assert_eq!(h.app.island_lyric().map(|(_,line)|line),Some("当前歌词"));
     let pet_width=if h.app.pet_enabled(){48.0}else{0.0};
     assert!((h.app.current_width()-crate::app::LYRIC_BAR_W-pet_width).abs()<2.0);
+}
+
+#[test]
+fn music_lyric_timing_follows_saved_delay_and_preserves_playback_position(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),position:9.8,duration:120.0,..Default::default()};
+    h.app.set_lyrics("Track","Artist",120.0,crate::lyrics::parse_lrc("[00:00]第一句\n[00:05]当前歌词\n[00:10]下一句"));
+    h.frame(vec![]);
+    assert_eq!(h.app.settings.lyric_delay_ms,-350,"未设置时应保留原有提前 0.35 秒的预设");
+    assert!((h.app.lyric_position()-10.15).abs()<0.001,"默认应提前 0.35 秒显示，且只应用一次");
+    for (delay,position,expected) in [(500,10.2,Some("当前歌词")),(-500,9.8,Some("下一句")),(0,9.8,Some("当前歌词")),(500,0.2,None),(500,0.6,Some("第一句"))]{
+        std::fs::write(crate::model::config_dir().join("settings.txt"),format!("lyric_delay_ms={delay}\nisland_lyrics=1\n")).unwrap();
+        h.app.settings=crate::model::Settings::load();
+        h.media.position=position;h.frame(vec![]);
+        assert_eq!(h.app.island_lyric().map(|(_,line)|line),expected,"延时 {delay} ms，播放位置 {position}");
+        assert!((h.app.media.position-position).abs()<0.001,"调整歌词不应改变播放进度");
+        h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+        for text in ["第一句","当前歌词","下一句"]{
+            let active=h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(t) if t.galley.text()==text && t.galley.job.sections[0].format.font_id.size==12.0));
+            assert_eq!(active,expected==Some(text),"展开歌词也应使用相同的显示时间");
+        }
+        h.app.settings.save();
+        assert_eq!(crate::model::Settings::load().lyric_delay_ms,delay,"重启后应保留时间调整");
+    }
+    for (input,expected) in [("invalid",-350),("999999",5000),("-999999",-5000),("",-350)]{
+        std::fs::write(crate::model::config_dir().join("settings.txt"),format!("lyric_delay_ms={input}\n")).unwrap();
+        assert_eq!(crate::model::Settings::load().lyric_delay_ms,expected);
+    }
+}
+
+#[test]
+fn music_lyric_timing_controls_match_focus_save_and_fit_the_small_settings_window(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();h.app.settings_tab=1;h.app.open_settings();h.ctx.set_embed_viewports(false);
+    fn frame(h:&mut H,events:Vec<egui::Event>)->Vec<egui::epaint::ClippedShape>{
+        let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();
+        egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
+            let id=viewport.ids.this;
+            let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(600.0,450.0))),
+                viewports:std::iter::once((id,egui::ViewportInfo{native_pixels_per_point:Some(1.25),focused:Some(true),..Default::default()})).collect(),
+                focused:true,events:events.clone(),..Default::default()};
+            *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
+        });
+        let raw=egui::RawInput{viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(1.25),..Default::default()})).collect(),..Default::default()};
+        let _=h.ctx.run(raw,|ctx|h.app.settings_ui(ctx,false));
+        let child=output.lock().unwrap().take().unwrap();child.shapes
+    }
+    let text_rect=|shapes:&[egui::epaint::ClippedShape],text:&str|shapes.iter().find_map(|shape|match &shape.shape{
+        egui::Shape::Text(t)if t.galley.text()==text=>Some(t.visual_bounding_rect()),_=>None,
+    }).unwrap_or_else(||panic!("设置中缺少 {text}"));
+    for _ in 0..3{frame(&mut h,vec![]);}
+    let music=frame(&mut h,vec![]);
+    text_rect(&music,"0.35 秒");
+    assert_eq!(h.app.settings.lyric_delay_ms,-350,"仅打开设置不能将 0.35 秒舍入为 0.4 秒");
+    for button in ["−","+"]{text_rect(&music,button);}
+    h.app.settings_tab=2;
+    for _ in 0..3{frame(&mut h,vec![]);}
+    let focus=frame(&mut h,vec![]);
+    for button in ["−","+"]{
+        let a=text_rect(&music,button);let b=text_rect(&focus,button);
+        assert!((a.left()-b.left()).abs()<0.1 && (a.width()-b.width()).abs()<0.1 && (a.height()-b.height()).abs()<0.1,"歌词和专注应共用同样的数值控件及右侧对齐");
+    }
+    h.app.settings_tab=1;
+    for _ in 0..3{frame(&mut h,vec![]);}
+    for (button,expected) in [("+",-450),("−",-350),("−",-250),("+",-350)]{
+        let shapes=frame(&mut h,vec![]);
+        let rect=text_rect(&shapes,button);
+        assert!(Rect::from_min_max(egui::pos2(180.0,0.0),egui::pos2(600.0,450.0)).contains_rect(rect),"时间调整按钮应完整显示");
+        let pos=rect.center();
+        frame(&mut h,vec![egui::Event::PointerMoved(pos),egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed:true,modifiers:Default::default()}]);
+        frame(&mut h,vec![egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed:false,modifiers:Default::default()}]);
+        assert_eq!(h.app.settings.lyric_delay_ms,expected);
+        assert_eq!(crate::model::Settings::load().lyric_delay_ms,expected,"按钮调整后应自动保存");
+        text_rect(&frame(&mut h,vec![]),&format!("{:.2} 秒",-expected as f64/1000.0));
+    }
 }
 
 #[test]
@@ -2888,4 +2998,60 @@ fn calendar_sync_result_does_not_enqueue_another_sync() {
     h.app.calendar.view.loading=false;
     h.app.calendar_event(crate::calendar::Event::Synced{config,events:vec![],at:"12:00".into()});
     assert!(!h.app.pending.iter().any(|cmd|matches!(cmd,crate::app::Cmd::CalendarMonth(_))),"同步结果不能触发下一轮同步，否则后台会持续请求");
+}
+
+#[test]
+fn page_order_persists_and_controls_navigation() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.page_order=[5,2,0,1,3,4,6,7];
+    h.app.settings.save();
+    let settings=crate::model::Settings::load();
+    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7]);
+    let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
+    assert_eq!(restarted.page(),5);
+    for page in [1,3,4,6,7] {h.app.set_page_visible(page,false);}
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    for expected in [5,2,0] {
+        h.click(H::local(398.0,68.0));
+        assert_eq!(h.app.page,expected);
+        h.hover(H::local(300.0,60.0),0.7);
+    }
+    h.click(H::local(21.0,68.0));
+    assert_eq!(h.app.page,2);
+    h.app.set_page_visible(2,false);
+    assert_eq!(h.app.page,5);
+    for invalid in ["0,0,1,2,3,4,5,6","8,1,2,3,4,5,6,7","0,1","invalid"] {
+        std::fs::write(crate::model::config_dir().join("settings.txt"),format!("page_order={invalid}\n")).unwrap();
+        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7]);
+    }
+}
+
+#[test]
+fn page_order_drag_applies_on_release_and_saves() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings_tab=10;h.app.open_settings();h.ctx.set_embed_viewports(false);
+    fn draw(h:&mut H,events:Vec<egui::Event>){
+        let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();
+        h.t+=0.02;let time=h.t;
+        egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
+            let id=viewport.ids.this;
+            let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(690.0,1000.0))),time:Some(time),events:events.clone(),viewports:std::iter::once((id,egui::ViewportInfo::default())).collect(),..Default::default()};
+            *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
+        });
+        let _=h.ctx.run(egui::RawInput::default(),|ctx|h.app.settings_ui(ctx,false));
+        let child=output.lock().unwrap().take().unwrap();h.shapes=child.shapes;
+    }
+    for _ in 0..3 {draw(&mut h,vec![]);}
+    let point=|h:&H,label:&str|h.shapes.iter().find_map(|s|match &s.shape {egui::Shape::Text(t) if t.galley.text()==label=>Some(t.visual_bounding_rect().left_center()),_=>None}).unwrap();
+    let from=point(&h,"播放控制与同步歌词")+egui::vec2(-18.0,-6.0);
+    let to=point(&h,"饮水记录与提醒");
+    let button=|pos,pressed|egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()};
+    draw(&mut h,vec![egui::Event::PointerMoved(from),button(from,true)]);
+    draw(&mut h,vec![egui::Event::PointerMoved(from+egui::vec2(0.0,10.0))]);
+    draw(&mut h,vec![egui::Event::PointerMoved(to)]);
+    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7]);
+    draw(&mut h,vec![button(to,false)]);
+    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7]);
+    assert_eq!(crate::model::Settings::load().page_order,h.app.settings.page_order);
 }

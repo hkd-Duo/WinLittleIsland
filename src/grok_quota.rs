@@ -74,8 +74,8 @@ fn session(value:&Value)->Result<Session,String>{
 fn native_session(account:&Account)->Result<Session,String>{
     let raw=fs::read(&account.source).map_err(|_|LOGIN_ERROR)?;let(active,entries)=accounts(&raw)?;
     let slot=account.slot.as_deref().or(active.as_deref()).ok_or(LOGIN_ERROR)?;
-    let entry=entries.get(slot).ok_or(LOGIN_ERROR)?;let key=native_key(&account.source)?;
-    let token=decrypt(&key,entry["cursor-access-token"].as_str().ok_or(LOGIN_ERROR)?,slot)?;
+    let entry=entries.get(slot).ok_or(LOGIN_ERROR)?;let key=native_key(&account.source).map_err(|_|"无法读取 Grok Bot 本机解密密钥，请使用浏览器连接")?;
+    let token=decrypt(&key,entry["cursor-access-token"].as_str().ok_or(LOGIN_ERROR)?,slot).map_err(|_|"无法解密 Grok Bot 本机登录，请使用浏览器连接")?;
     if slot_of(&token)?!=slot{return Err("Grok Bot 账号已变化，请重新识别账号".into());}
     Ok(Session{token,refresh:None})
 }
@@ -111,14 +111,25 @@ fn read_json(response:ureq::Response)->Result<Value,String>{
     serde_json::from_slice(&body).map_err(|_|"Grok Bot 未返回有效数据".into())
 }
 fn http_error(error:ureq::Error)->(String,u64){match error{
-    ureq::Error::Status(401|403,_)=>(LOGIN_ERROR.into(),0),
+    ureq::Error::Status(401,_)=>("Grok Bot 登录已失效（401），请重新连接".into(),0),
+    ureq::Error::Status(403,_)=>("Grok Bot 额度请求被拒绝（403），请检查账号权限或网络代理".into(),60),
     ureq::Error::Status(429,response)=>("请求过于频繁，稍后自动重试".into(),response.header("Retry-After").and_then(|s|s.parse().ok()).unwrap_or(180).clamp(30,3600)),
     ureq::Error::Status(code,_)=>(format!("Grok Bot 额度服务暂不可用（{code}）"),60),
     _=>("无法连接 Grok Bot，请检查网络或代理".into(),30),
 }}
+fn checksum(machine:&str,millis:i64)->String{
+    let stamp=(millis/1_000_000) as u32;
+    // 与客户端 JavaScript 的移位规则一致：移位数按 32 取模。
+    let mut bytes=[(stamp>>8) as u8,stamp as u8,(stamp>>24) as u8,(stamp>>16) as u8,(stamp>>8) as u8,stamp as u8];
+    let mut previous=165;
+    for (i,byte) in bytes.iter_mut().enumerate(){*byte=(*byte^previous).wrapping_add(i as u8);previous=*byte;}
+    format!("{}{machine}",URL_SAFE_NO_PAD.encode(bytes))
+}
 fn usage_request(agent:&ureq::Agent,url:&str,token:&str)->Result<ureq::Response,ureq::Error>{
+    let request_id=uuid();
     agent.post(url).set("Authorization",&format!("Bearer {token}")).set("Content-Type","application/json").set("Accept","application/json")
         .set("Connect-Protocol-Version","1").set("x-cursor-client-type","sand").set("x-cursor-client-version","0.1.0")
+        .set("x-cursor-checksum",&checksum(&request_id,chrono::Utc::now().timestamp_millis())).set("x-request-id",&request_id)
         .set("x-sand-box-namespace","prod").set("x-ghost-mode","true").send_string("{}")
 }
 fn renew(agent:&ureq::Agent,old:&Session)->Result<Session,String>{
@@ -139,7 +150,7 @@ pub fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>
     }
     let stamp=fs::metadata(&account.source).and_then(|m|m.modified()).ok();
     let url=format!("{BACKEND}/aiserver.v1.DashboardService/GetSandUsageStatus");let mut result=usage_request(agent,&url,&auth.token);
-    if own && auth.refresh.is_some() && matches!(&result,Err(ureq::Error::Status(401|403,_))){
+    if own && auth.refresh.is_some() && matches!(&result,Err(ureq::Error::Status(401,_))){
         auth=renew(agent,&auth).map_err(|e|(e,0))?;save_session(slot,&auth).map_err(|e|(e,0))?;result=usage_request(agent,&url,&auth.token);
     }
     let value=read_json(result.map_err(http_error)?).map_err(|e|(e,60))?;
@@ -148,6 +159,13 @@ pub fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>
 }
 
 pub struct Connected {pub slot:String,pub label:String}
+fn uuid()->String{
+    // 请求标识无需保密，以纳秒时间和进程号生成，避免依赖系统随机源。
+    let input=format!("{}:{}",std::process::id(),chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default());
+    let hash=digest::digest(&digest::SHA256,input.as_bytes());let mut bytes=[0u8;16];bytes.copy_from_slice(&hash.as_ref()[..16]);
+    bytes[6]=(bytes[6]&15)|64;bytes[8]=(bytes[8]&63)|128;
+    let hex:String=bytes.iter().map(|b|format!("{b:02x}")).collect();format!("{}-{}-{}-{}-{}",&hex[..8],&hex[8..12],&hex[12..16],&hex[16..20],&hex[20..])
+}
 pub struct Login {rx:mpsc::Receiver<Result<Connected,String>>,cancel:Arc<AtomicBool>}
 fn challenge(verifier:&str)->String{URL_SAFE_NO_PAD.encode(digest::digest(&digest::SHA256,verifier.as_bytes()).as_ref())}
 impl Login {
@@ -237,6 +255,16 @@ mod tests {
         assert_eq!(challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),"E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
     }
     #[test]
+    fn request_checksum_matches_the_client_timestamp_encoding(){
+        assert_eq!(checksum("synthetic-machine",1_790_000_000_000),"9cbI1oq_synthetic-machine");
+    }
+    #[test]
+    fn forbidden_requests_are_not_reported_as_expired_credentials(){
+        let response=ureq::Response::new(403,"Forbidden","private-response").unwrap();
+        let(message,wait)=http_error(ureq::Error::Status(403,response));
+        assert!(message.contains("403"));assert!(!message.contains("重新连接"));assert!(!message.contains("private-response"));assert!(wait>0);
+    }
+    #[test]
     fn renewal_keeps_the_same_account_and_preserves_or_rotates_its_refresh_token(){
         let token=|sub:&str,exp:i64|format!("e30.{}.test",URL_SAFE_NO_PAD.encode(json!({"sub":sub,"exp":exp}).to_string()));
         let old=Session{token:token("synthetic",1),refresh:Some("old-refresh".into())};
@@ -267,8 +295,9 @@ mod tests {
             let length=request.lines().find_map(|line|line.strip_prefix("content-length:").map(|v|v.trim().parse::<usize>().unwrap())).unwrap();
             let mut body=vec![0;length];reader.read_exact(&mut body).unwrap();assert_eq!(body,b"{}");
             assert!(request.starts_with("post /aiserver.v1.dashboardservice/getsandusagestatus "));assert!(request.contains("authorization: bearer synthetic-token"));assert!(request.contains("connect-protocol-version: 1"));
+            assert!(request.contains("x-cursor-checksum: "));assert!(request.contains("x-request-id: "));
             stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 24\r\nConnection: close\r\n\r\nsecret-that-must-not-echo").unwrap();
         });
-        let error=usage_request(&ureq::AgentBuilder::new().build(),&url,"synthetic-token").unwrap_err();let(message,wait)=http_error(error);assert_eq!(message,LOGIN_ERROR);assert_eq!(wait,0);server.join().unwrap();
+        let error=usage_request(&ureq::AgentBuilder::new().build(),&url,"synthetic-token").unwrap_err();let(message,wait)=http_error(error);assert!(message.contains("401"));assert!(!message.contains("secret-that-must-not-echo"));assert_eq!(wait,0);server.join().unwrap();
     }
 }

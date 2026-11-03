@@ -455,7 +455,7 @@ mod tests {
     use super::*;
     #[test]
     fn number_stepper_clicks_follow_steps_and_limits() {
-        for (initial,step,x,expected) in [(5,1,127.0,6),(5,1,13.0,4),(0,1,13.0,0),(10,1,127.0,10),(9,3,127.0,10),(1,3,13.0,0)] {
+        for (initial,step,x,expected) in [(5u32,1,127.0,6),(5,1,13.0,4),(0,1,13.0,0),(10,1,127.0,10),(9,3,127.0,10),(1,3,13.0,0)] {
             let ctx=egui::Context::default();
             let mut value=initial;
             let pos=egui::pos2(x+20.0,34.0);
@@ -479,11 +479,11 @@ mod tests {
         let _=ctx.run(raw,|ctx|{
             egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{
                 ui.spacing_mut().button_padding=egui::vec2(10.0,6.0);
-                for mut value in [0,25,180] {
+                for mut value in [0u32,25,180] {
                     let row=ui.horizontal(|ui|{number_stepper(ui,&mut value,0,180," 分钟",1,76.0);});
                     assert!(row.response.rect.width()<=140.1,"数值控件超出预留宽度：{}",row.response.rect.width());
                 }
-                for mut value in [25,5,15] {setting_number(ui,"计时时长",&mut value,1,180," 分钟",1.0);}
+                for mut value in [25u32,5,15] {setting_number(ui,"计时时长",&mut value,1,180," 分钟",1.0);}
                 assert!(ui.min_rect().right()<=340.1,"连续数值行不应撑宽卡片");
             });
         });
@@ -697,19 +697,19 @@ pub(crate) fn settings_label(ui:&mut egui::Ui,text:&str){
     ui.label(egui::RichText::new(text).size(11.5).color(Color32::from_gray(185)));
     ui.add_space(2.0);
 }
-fn setting_number(ui:&mut egui::Ui,title:&str,value:&mut u32,min:u32,max:u32,suffix:&str,speed:f64)->bool{
+fn setting_number<N:egui::emath::Numeric>(ui:&mut egui::Ui,title:&str,value:&mut N,min:N,max:N,suffix:&str,speed:f64)->bool{
     let mut changed=false;
     ui.horizontal(|ui|{
         ui.label(egui::RichText::new(title).size(12.0).color(Color32::WHITE));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
             ui.allocate_ui_with_layout(egui::vec2(140.0,30.0),egui::Layout::left_to_right(egui::Align::Center),|ui|{
-                changed=number_stepper(ui,value,min,max,suffix,speed as u32,76.0);
+                changed=number_stepper(ui,value,min,max,suffix,N::from_f64(speed),76.0);
             });
         });
     });
     changed
 }
-fn number_stepper(ui:&mut egui::Ui,value:&mut u32,min:u32,max:u32,suffix:&str,step:u32,field_width:f32)->bool{
+fn number_stepper<N:egui::emath::Numeric>(ui:&mut egui::Ui,value:&mut N,min:N,max:N,suffix:&str,step:N,field_width:f32)->bool{
     let mut changed=false;
     ui.scope(|ui|{
         ui.spacing_mut().item_spacing.x=6.0;
@@ -718,12 +718,12 @@ fn number_stepper(ui:&mut egui::Ui,value:&mut u32,min:u32,max:u32,suffix:&str,st
             .fill(Color32::from_rgb(48,48,51)).stroke(egui::Stroke::NONE).corner_radius(13.0);
         let decrease=ui.add_enabled(*value>min,button("−").min_size(egui::vec2(26.0,26.0))).on_hover_text("减少");
         if decrease.clicked(){
-            *value=value.saturating_sub(step).max(min);changed=true;
+            *value=N::from_f64((value.to_f64()-step.to_f64()).max(min.to_f64()));changed=true;
         }
-        let field=ui.add_sized([field_width,28.0],egui::DragValue::new(value).range(min..=max).speed(step as f64).suffix(suffix));
+        let field=ui.add_sized([field_width,28.0],egui::DragValue::new(value).range(min..=max).speed(step.to_f64()).suffix(suffix).fixed_decimals(if N::INTEGRAL{0}else{2}));
         changed|=field.changed();
         if ui.add_enabled(*value<max,button("+").min_size(egui::vec2(26.0,26.0))).on_hover_text("增加").clicked(){
-            *value=value.saturating_add(step).min(max);changed=true;
+            *value=N::from_f64((value.to_f64()+step.to_f64()).min(max.to_f64()));changed=true;
         }
     });
     changed
@@ -756,6 +756,8 @@ const SETTINGS_GROUPS: [(&str,usize,usize);8] = [
 
 impl App {
     pub fn settings_ui(&mut self,ctx:&egui::Context,autostart:bool){
+        self.updates.poll(ctx);
+        self.updates.dialog_ui(ctx);
         if !self.settings_open{return;}
         let id=egui::ViewportId::from_hash_of("daozai-settings");
         let focus_requested=std::mem::take(&mut self.settings_focus_requested);
@@ -842,12 +844,36 @@ impl App {
                         settings_label(ui,"功能页面");
                         settings_card(ui,|ui|{
                             let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程"];
-                            for (page,name) in PAGE_NAMES.iter().enumerate() {
-                                if page>0 {ui.separator();}
+                            ui.label(egui::RichText::new("拖动左侧手柄调整顺序，松开后自动应用到岛。").size(11.5).color(Color32::from_gray(180)));
+                            #[derive(Clone)]
+                            struct PageDrag(usize);
+                            let mut movement=None;
+                            for (index,page) in self.settings.page_order.into_iter().enumerate() {
+                                if index>0 {ui.separator();}
                                 let mut visible=self.settings.visible_pages[page];
                                 let can_change=!visible || self.settings.visible_pages.iter().filter(|enabled|**enabled).count()>1;
-                                ui.add_enabled_ui(can_change,|ui|{setting_row(ui,name,descriptions[page],&mut visible);});
+                                let row=ui.push_id(("page-order",page),|ui|ui.horizontal(|ui|{
+                                    let (rect,handle)=ui.allocate_exact_size(egui::vec2(20.0,40.0),egui::Sense::drag());
+                                    for x in [-3.0,3.0] {for y in [-6.0,0.0,6.0] {
+                                        ui.painter().circle_filled(rect.center()+egui::vec2(x,y),1.4,Color32::from_gray(155));
+                                    }}
+                                    handle.on_hover_cursor(egui::CursorIcon::Grab).dnd_set_drag_payload(PageDrag(page));
+                                    ui.add_enabled_ui(can_change,|ui|{setting_row(ui,PAGE_NAMES[page],descriptions[page],&mut visible);});
+                                })).inner.response;
+                                if let Some(payload)=row.dnd_hover_payload::<PageDrag>() {
+                                    if payload.0!=page {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                                        let y=if self.settings.page_order.iter().position(|p|*p==payload.0).unwrap()<index {row.rect.bottom()}else{row.rect.top()};
+                                        ui.painter().line_segment([egui::pos2(row.rect.left(),y),egui::pos2(row.rect.right(),y)],egui::Stroke::new(2.0,Color32::from_rgb(70,150,255)));
+                                    }
+                                }
+                                if let Some(payload)=row.dnd_release_payload::<PageDrag>() {movement=Some((payload.0,index));}
                                 if visible!=self.settings.visible_pages[page] {self.set_page_visible(page,visible);}
+                            }
+                            if let Some((page,to))=movement {
+                                let from=self.settings.page_order.iter().position(|p|*p==page).unwrap();
+                                if from<to {self.settings.page_order[from..=to].rotate_left(1);}
+                                else {self.settings.page_order[to..=from].rotate_right(1);}
                             }
                             if self.settings.visible_pages.iter().filter(|enabled|**enabled).count()==1 {
                                 ui.add_space(5.0);
@@ -888,6 +914,13 @@ impl App {
                             self.show_lyrics=self.settings.lyrics_enabled;
                             ui.separator();
                             setting_row(ui,"岛上歌词","收起时显示当前句；长句分段切换，无歌词时保留布局",&mut self.settings.island_lyrics);
+                        });
+                        settings_label(ui,"歌词显示时间");
+                        settings_card(ui,|ui|{
+                            let mut advance=-self.settings.lyric_delay_ms as f64/1000.0;
+                            if setting_number(ui,"时间偏移",&mut advance,-5.0,5.0," 秒",0.1){self.settings.lyric_delay_ms=(-advance*1000.0).round()as i32;}
+                            ui.add_space(3.0);
+                            ui.small("正数提前，负数延后；默认提前 0.35 秒。");
                         });
                     }
                     2=>{
@@ -1189,6 +1222,7 @@ impl App {
                         settings_label(ui,"岛仔 Daozai");
                         settings_card(ui,|ui|{
                             ui.label(egui::RichText::new(format!("版本 {}",env!("CARGO_PKG_VERSION"))).size(13.0));
+                            self.updates.ui(ui);
                             ui.label(egui::RichText::new("桌面顶部的音乐、专注、提醒与日程小助手。").size(12.0).color(Color32::from_gray(180)));
                             ui.horizontal_wrapped(|ui|{
                                 ui.label(egui::RichText::new("设备图标：Solar Icons · 480 Design").size(11.0).color(Color32::from_gray(150)));

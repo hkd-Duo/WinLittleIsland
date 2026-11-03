@@ -6,6 +6,8 @@ use daozai::app::{self, App, Cmd, Env, Options};
 use daozai::smtc;
 use std::time::{Duration, Instant};
 
+mod diagnostics;
+
 struct Shell {
     app: App,
     t0: Instant,
@@ -442,7 +444,18 @@ fn open_path(p: &std::path::Path)->Result<(),String> {
 #[cfg(not(windows))]
 fn open_path(_p: &std::path::Path)->Result<(),String> {Ok(())}
 
-fn main() -> eframe::Result<()> {
+fn main() -> std::process::ExitCode {
+    diagnostics::install();
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            diagnostics::report("岛仔启动或运行失败。", &error.to_string());
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> eframe::Result<()> {
     // 单实例（与原版同名互斥体）
     #[cfg(windows)]
     if !daozai::tray::single_instance() {

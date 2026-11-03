@@ -33,6 +33,7 @@ pub mod paint;
 pub mod shape;
 pub mod smtc;
 pub mod theme;
+mod updates;
 
 #[cfg(windows)]
 pub mod native;

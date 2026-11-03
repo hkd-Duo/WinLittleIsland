@@ -13,7 +13,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject, SetWindowRgn};
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
@@ -42,10 +42,28 @@ fn inside_hit(x: i32, y: i32) -> bool {
     hit().lock().unwrap_or_else(|e|e.into_inner()).iter().any(|&(l,t,r,b)|x>=l&&x<r&&y>=t&&y<b)
 }
 
-fn file_drag_region(region:(i32,i32,i32,i32),zone:Option<(i32,i32,i32,i32)>,button_down:bool)->(i32,i32,i32,i32){
-    match zone.filter(|_|button_down) {
+fn file_drag_region(region:(i32,i32,i32,i32),zone:Option<(i32,i32,i32,i32)>,capture:bool)->(i32,i32,i32,i32){
+    match zone.filter(|_|capture) {
         Some(zone)=>(region.0.min(zone.0),region.1.min(zone.1),region.2.max(zone.2),region.3.max(zone.3)),
         None=>region,
+    }
+}
+
+#[derive(Default)]
+struct DragCapture {
+    origin: Option<(i32,i32)>,
+    moved: bool,
+}
+
+impl DragCapture {
+    fn update(&mut self,down:bool,cursor:Option<(i32,i32)>,zone:Option<(i32,i32,i32,i32)>,threshold:(i32,i32))->bool {
+        let Some(cursor)=cursor.filter(|_|down && zone.is_some()) else {
+            *self=Self::default();
+            return false;
+        };
+        let origin=*self.origin.get_or_insert(cursor);
+        self.moved|=(cursor.0-origin.0).abs()>threshold.0 || (cursor.1-origin.1).abs()>threshold.1;
+        self.moved && zone.is_some_and(|(l,t,r,b)|cursor.0>=l && cursor.0<r && cursor.1>=t && cursor.1<b)
     }
 }
 
@@ -163,6 +181,7 @@ pub struct Window {
     expanded: bool,
     hook: HWINEVENTHOOK,
     browser_state: (Option<bool>,Instant),
+    drag_capture: DragCapture,
 }
 
 impl Window {
@@ -182,7 +201,7 @@ impl Window {
                 WINEVENT_OUTOFCONTEXT,
             )
         };
-        Some(Self { hwnd, region: (0, 0, 0, 0), expanded: false, hook, browser_state:(None,Instant::now()-Duration::from_millis(100)) })
+        Some(Self { hwnd, region: (0, 0, 0, 0), expanded: false, hook, browser_state:(None,Instant::now()-Duration::from_millis(100)), drag_capture:DragCapture::default() })
     }
 
     pub fn browser_at_top(&mut self)->Option<bool> {
@@ -205,9 +224,14 @@ impl Window {
     ) {
         let px = |v: f32| (v * ppp).round() as i32;
         let r = (px(region.0), px(region.1), px(region.0 + region.2), px(region.1 + region.3));
-        // 按住拖拽按钮时提前接收 OLE 文件事件，普通鼠标命中区仍只覆盖岛体。
+        // 仅在拖动进入感应区后扩大 OLE 接收区域，避免普通点击改变透明窗口裁剪。
         let button_down=unsafe{GetAsyncKeyState(VK_LBUTTON.0 as i32)<0 || GetAsyncKeyState(VK_RBUTTON.0 as i32)<0};
-        let r=file_drag_region(r,file_drop_zone.map(|(x,y,w,h)|(px(x),px(y),px(x+w),px(y+h))),button_down);
+        let zone=file_drop_zone.map(|(x,y,w,h)|(px(x),px(y),px(x+w),px(y+h)));
+        let mut cursor=POINT::default();let mut window=RECT::default();
+        let cursor=unsafe{(GetCursorPos(&mut cursor).is_ok() && GetWindowRect(self.hwnd,&mut window).is_ok()).then_some((cursor.x-window.left,cursor.y-window.top))};
+        let threshold=unsafe{((GetSystemMetrics(SM_CXDRAG)/2).max(1),(GetSystemMetrics(SM_CYDRAG)/2).max(1))};
+        let capture=self.drag_capture.update(button_down,cursor,zone,threshold);
+        let r=file_drag_region(r,zone,capture);
         let h = (
             px(hit_rect.0),
             px(hit_rect.1),
@@ -248,6 +272,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn drag_capture_ignores_clicks_and_pointer_jitter() {
+        let mut capture=DragCapture::default();let zone=Some((110,0,530,120));
+        assert!(!capture.update(true,Some((300,60)),zone,(4,4)),"感应区内按下不能直接扩大窗口");
+        assert!(!capture.update(true,Some((302,61)),zone,(4,4)),"点击时的小幅抖动不算拖动");
+        assert!(!capture.update(false,Some((302,61)),zone,(4,4)));
+    }
+
+    #[test]
+    fn drag_capture_requires_movement_and_entry_and_resets_after_release() {
+        let mut capture=DragCapture::default();let zone=Some((110,0,530,120));
+        assert!(!capture.update(true,Some((700,400)),zone,(4,4)));
+        assert!(!capture.update(true,Some((650,300)),zone,(4,4)),"远处拖动不能改变岛的区域");
+        assert!(capture.update(true,Some((300,60)),zone,(4,4)),"拖到感应区后允许接收文件");
+        assert!(!capture.update(true,Some((700,400)),zone,(4,4)),"离开感应区应恢复区域");
+        assert!(capture.update(true,Some((300,60)),zone,(4,4)));
+        assert!(!capture.update(false,Some((300,60)),zone,(4,4)));
+        assert!(!capture.update(true,Some((300,60)),zone,(4,4)),"下一次点击不能沿用上次拖动状态");
+        assert!(!capture.update(true,None,zone,(4,4)));
+        assert!(!capture.update(true,Some((300,60)),None,(4,4)));
+    }
+
+    #[test]
     fn expanding_raises_the_island_without_activating_it(){
         struct TestWindow(HWND);
         impl Drop for TestWindow {fn drop(&mut self){unsafe{let _=DestroyWindow(self.0);}}}
@@ -269,7 +315,7 @@ mod tests {
             assert!(above(cover.0,island.0),"先复现其他窗口盖住岛体");
             let foreground=GetForegroundWindow();
             let saved=hit().lock().unwrap_or_else(|e|e.into_inner()).clone();
-            let mut native=Window{hwnd:island.0,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,Instant::now())};
+            let mut native=Window{hwnd:island.0,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,Instant::now()),drag_capture:DragCapture::default()};
             let update=|native:&mut Window,expanded|native.update((0.0,0.0,416.0,140.0),(0.0,0.0,416.0,140.0),None,None,1.0,false,expanded);
             update(&mut native,true);
             assert!(above(island.0,cover.0),"展开时必须重新抬高实际窗口层级，不能只检查置顶标记");
@@ -292,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    fn file_drag_expands_capture_only_while_a_drag_button_is_held(){
+    fn file_drag_expands_region_only_when_capture_is_active(){
         let island=(230,0,410,42);let zone=(110,0,530,120);
         assert_eq!(file_drag_region(island,Some(zone),false),island,"普通悬停不扩大原生区域");
         assert_eq!(file_drag_region(island,Some(zone),true),zone,"拖入感应区应覆盖岛下方");

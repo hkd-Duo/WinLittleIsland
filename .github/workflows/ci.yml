@@ -14,7 +14,13 @@ jobs:
       - name: 安装 Rust stable
         run: rustup toolchain install stable --profile minimal
       - name: 测试
-        run: cargo +stable test --locked --all-targets --features record -- --test-threads=1
+        run: cargo +stable test --locked --all-targets --features record --target x86_64-pc-windows-msvc -- --test-threads=1
+      - name: 构建并检查发布运行库
+        shell: pwsh
+        run: |
+          cargo +stable build --locked --release --bin daozai --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw '发布构建失败' }
+          ./scripts/check-runtime.ps1 -Executable ./target/x86_64-pc-windows-msvc/release/daozai.exe
       - name: 检查安装脚本语法
         shell: pwsh
         run: |
@@ -23,3 +29,14 @@ jobs:
             [System.Management.Automation.Language.Parser]::ParseFile($_.FullName,[ref]$null,[ref]$parseErrors) | Out-Null
             if ($parseErrors) { throw ($parseErrors | Out-String) }
           }
+      - name: 验证原生安装、升级与卸载
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'nsis-3.13.zip'
+          Invoke-WebRequest 'https://downloads.sourceforge.net/project/nsis/NSIS%203/3.13/nsis-3.13.zip' -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne 'ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8') { throw 'NSIS 校验失败' }
+          Expand-Archive -LiteralPath $archive -DestinationPath $env:RUNNER_TEMP
+          $compiler = Join-Path $env:RUNNER_TEMP 'nsis-3.13\makensis.exe'
+          ./tests/native_installer.ps1 -NsisCompiler $compiler
+          ./tests/update_installer.ps1
+          ./scripts/package.ps1 -SkipBuild -NsisCompiler $compiler

@@ -387,6 +387,7 @@ pub struct App {
     /// v0.5.6：日历（CalDAV）配置、未来 24 小时事件与设置表单。
     pub(crate) calendar: CalendarState,
     pub(crate) quota: crate::quota_ui::State,
+    pub(crate) updates: crate::updates::State,
     pub(crate) resident: bar::Motion,
     pub(crate) resident_power: (Option<u8>,bool),
 }
@@ -395,6 +396,7 @@ impl App {
     pub fn new(ctx: &egui::Context, opts: Options) -> Self {
         theme::load_fonts(ctx);
         egui_extras::install_image_loaders(ctx);
+        ctx.set_theme(egui::ThemePreference::Dark);
         ctx.set_visuals(egui::Visuals::dark());
         ctx.style_mut(|s| {
             s.interaction.selectable_labels = false;
@@ -405,7 +407,7 @@ impl App {
         let (bw, bh) = if settings.minimal { (BAR_W_MIN, BAR_H_MIN) } else { (BAR_W, BAR_H) };
         let focus_seconds=settings.focus_minutes as f32*60.0;
         let initial_lyrics=settings.lyrics_enabled;
-        let initial_page=settings.visible_pages.iter().position(|enabled|*enabled).unwrap_or(0);
+        let initial_page=settings.page_order.iter().copied().find(|page|settings.visible_pages[*page]).unwrap_or(0);
         Self {
             opts,
             settings,
@@ -479,6 +481,7 @@ impl App {
             mail: MailState { accounts: mail::load_accounts(), ..Default::default() },
             calendar: CalendarState::load(),
             quota: crate::quota_ui::State::load(),
+            updates: Default::default(),
             resident: Default::default(), resident_power:(None,false),
         }
     }
@@ -846,13 +849,14 @@ impl App {
             && self.settings.visible_pages[page] { return; }
         self.settings.visible_pages[page]=visible;
         if !self.settings.visible_pages[self.page] {
-            if let Some(first)=self.settings.visible_pages.iter().position(|enabled|*enabled) { self.go(first,1.0); }
+            if let Some(first)=self.settings.page_order.iter().copied().find(|page|self.settings.visible_pages[*page]) { self.go(first,1.0); }
         }
     }
 
     fn navigate_page(&mut self,next:bool) {
+        let position=self.settings.page_order.iter().position(|page|*page==self.page).unwrap();
         for offset in 1..=PAGE_NAMES.len() {
-            let page=(self.page+if next {offset}else{PAGE_NAMES.len()-offset})%PAGE_NAMES.len();
+            let page=self.settings.page_order[(position+if next {offset}else{PAGE_NAMES.len()-offset})%PAGE_NAMES.len()];
             if self.settings.visible_pages[page] {
                 self.go(page,if next {1.0}else{-1.0});
                 break;
@@ -909,14 +913,13 @@ impl App {
     }
     pub(crate) fn compact_notices(&self)->bool {self.island_lyrics_active()&&!self.open&&!self.notice.as_ref().is_some_and(|a|a.meeting.is_some())}
 
-    /// 换句、分段和展开高亮共用预读时间，为文字过渡留出提前量。
-    pub(crate) fn lyric_position(&self)->f32 {(self.media.position+0.35)as f32}
+    /// 换句、分段和展开高亮共用时间调整；正数延后，负数提前。
+    pub(crate) fn lyric_position(&self)->f32 {(self.media.position-self.settings.lyric_delay_ms as f64/1000.0)as f32}
 
     pub(crate) fn island_lyric(&self) -> Option<(usize,&str)> {
         if !self.island_lyrics_active(){return None;}
         if self.ly.key!=format!("{}|{}|{:.0}",self.media.title,self.media.artist,self.media.duration) {return None;}
         let lyrics=self.ly.lyrics.as_ref().filter(|lyrics|lyrics.synced)?;
-        // 提前预读下一句，为淡入留出时间，让文字在开唱前清晰出现。
         let index=lyrics.index_at(self.lyric_position())?;
         let text=lyrics.lines.get(index)?.text.trim();
         (!text.is_empty()).then_some((index,text))
@@ -1555,7 +1558,7 @@ impl App {
     }
 
     fn nav(&mut self, c: &Card) {
-        let pages: Vec<_>=self.settings.visible_pages.iter().enumerate().filter_map(|(page,enabled)|enabled.then_some(page)).collect();
+        let pages: Vec<_>=self.settings.page_order.iter().copied().filter(|page|self.settings.visible_pages[*page]).collect();
         if pages.len()<2 { return; }
         let l = c.hit(8.0, 55.0, 26.0, 26.0, "nav-l");
         let r = c.hit(385.0, 55.0, 26.0, 26.0, "nav-r");
@@ -1587,7 +1590,8 @@ impl App {
             x += w + gap;
         }
         if let Some(i) = clicked {
-            let dir = if i > self.page { 1.0 } else { -1.0 };
+            let position=|page|self.settings.page_order.iter().position(|p|*p==page).unwrap();
+            let dir = if position(i) > position(self.page) { 1.0 } else { -1.0 };
             self.go(i, dir);
         }
     }
@@ -1723,11 +1727,13 @@ impl App {
             self.media_anchor = (m.title.clone(), m.position, env.t, m.playing);
         }
         let mut np = m.clone();
-        if m.playing && m.duration > 0.0 {
+        if m.playing {
             let (_, pos, at, _) = &self.media_anchor;
-            np.position = if let Some(sampled)=m.sampled_at {(m.position+sampled.elapsed().as_secs_f64()).min(m.duration)}
-                else {(pos + (env.t - at).min(3.0)).min(m.duration)};
+            np.position = if let Some(sampled)=m.sampled_at {m.position+sampled.elapsed().as_secs_f64()}
+                else {pos + (env.t - at).min(3.0)};
+            if m.duration>0.0 {np.position=np.position.min(m.duration);}
         }
+        if self.media.source != np.source { self.ly=LyricsState::default(); }
         self.media = np;
         if let Some(image)=&self.media.artwork {
             if !self.music_artwork.as_ref().is_some_and(|(old,_)|std::sync::Arc::ptr_eq(old,image)) {
@@ -1746,18 +1752,22 @@ impl App {
             self.ly = LyricsState { key, loading: true, ..Default::default() };
             let (tx, rx) = std::sync::mpsc::channel();
             self.ly.rx = Some(rx);
-            let (title, artist, dur) = (np.title.clone(), np.artist.clone(), np.duration);
+            let (source, title, artist, dur) = (np.source.clone(), np.title.clone(), np.artist.clone(), np.duration);
             std::thread::spawn(move || {
-                let _ = tx.send(lyrics::fetch(&title, &artist, dur));
+                let _ = tx.send(lyrics::fetch_for_source(&source, &title, &artist, dur));
             });
         }
         if let Some(rx) = &self.ly.rx {
             if let Ok(r) = rx.try_recv() {
                 self.ly.loading = false;
                 match r {
-                    Ok(l) => self.ly.lyrics = Some(l),
+                    Ok(l) => {
+                        if lyrics::is_soda(&self.media.source) && !l.synced {self.ly.retry_at=Some(self.t+5.0);}
+                        self.ly.lyrics = Some(l);
+                    },
                     Err(error) => {
-                        if matches!(error,lyrics::FetchError::Unavailable(_)|lyrics::FetchError::InvalidResponse(_)){self.ly.retry_at=Some(self.t+30.0);}
+                        if lyrics::is_soda(&self.media.source) {self.ly.retry_at=Some(self.t+5.0);}
+                        else if matches!(error,lyrics::FetchError::Unavailable(_)|lyrics::FetchError::InvalidResponse(_)){self.ly.retry_at=Some(self.t+30.0);}
                         self.ly.error = Some(error);
                     },
                 }

@@ -89,6 +89,7 @@ pub struct Settings {
     pub minimal: bool,
     pub browser_minimal: bool,
     pub visible_pages: [bool; 8],
+    pub page_order: [usize; 8],
     pub show_battery: bool,
     pub resident_order: Vec<usize>,
     pub system_hud: bool,
@@ -97,6 +98,7 @@ pub struct Settings {
     pub sound: bool,
     pub lyrics_enabled:bool,
     pub island_lyrics:bool,
+    pub lyric_delay_ms:i32,
     pub hide_fullscreen: bool,
     pub focus_minutes: u32,
     pub rest_minutes: u32,
@@ -118,7 +120,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { pet: true, minimal: false, browser_minimal: false, visible_pages: [true; 8], show_battery: true, resident_order: Vec::new(), system_hud: true, read_notifications:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
+        Self { pet: true, minimal: false, browser_minimal: false, visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, resident_order: Vec::new(), system_hud: true, read_notifications:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
     }
 }
 
@@ -134,6 +136,13 @@ impl Settings {
                     let order:Vec<usize>=v.split(',').filter_map(|n|n.parse().ok()).collect();
                     if crate::bar_layout::valid_order(&order){s.resident_order=order;}
                 }
+                "page_order" => {
+                    if let Ok(order)=v.split(',').map(str::parse::<usize>).collect::<Result<Vec<_>,_>>() {
+                        if order.len()==8 && (0..8).all(|page|order.contains(&page)) {
+                            s.page_order.copy_from_slice(&order);
+                        }
+                    }
+                }
                 "show_battery" => s.show_battery = v != "0",
                 "visible_pages" if (6..=8).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
                     for (enabled,value) in s.visible_pages.iter_mut().zip(v.bytes()) { *enabled=value==b'1'; }
@@ -145,6 +154,7 @@ impl Settings {
                 "sound" => s.sound = v == "1",
                 "lyrics_enabled" => s.lyrics_enabled=v!="0",
                 "island_lyrics" => s.island_lyrics=v=="1",
+                "lyric_delay_ms" => s.lyric_delay_ms=v.parse::<i32>().unwrap_or(-350).clamp(-5000,5000),
                 "hide_fullscreen" => s.hide_fullscreen = v != "0",
                 "focus_minutes" => s.focus_minutes = v.parse::<u32>().unwrap_or(25).clamp(1, 180),
                 "rest_minutes" | "short_minutes" => s.rest_minutes = v.parse::<u32>().unwrap_or(5).clamp(1, 60),
@@ -174,6 +184,7 @@ impl Settings {
                 ("minimal".into(), if self.minimal { "1".to_string() } else { "0".to_string() }),
                 ("browser_minimal".into(), (self.browser_minimal as u8).to_string()),
                 ("visible_pages".into(), self.visible_pages.iter().map(|enabled|if *enabled {'1'}else{'0'}).collect()),
+                ("page_order".into(),self.page_order.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
                 ("resident_order".into(),self.resident_order.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
                 ("show_battery".into(), (self.show_battery as u8).to_string()),
                 ("read_notifications".into(),(self.read_notifications as u8).to_string()),
@@ -182,6 +193,7 @@ impl Settings {
                 ("sound".into(), (self.sound as u8).to_string()),
                 ("lyrics_enabled".into(),(self.lyrics_enabled as u8).to_string()),
                 ("island_lyrics".into(),(self.island_lyrics as u8).to_string()),
+                ("lyric_delay_ms".into(),self.lyric_delay_ms.to_string()),
                 ("hide_fullscreen".into(), (self.hide_fullscreen as u8).to_string()),
                 ("focus_minutes".into(), self.focus_minutes.to_string()),
                 ("rest_minutes".into(), self.rest_minutes.to_string()),

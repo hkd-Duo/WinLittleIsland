@@ -300,8 +300,9 @@ impl Failure {
     fn status(provider: Provider, code: u16) -> Self {
         let message = match code {
             401 => format!("用户名或密码不对，请回{}重新生成一次", provider.label()),
-            403 => "这个账号没有日历读取权限（403）".to_string(),
+            403 => "日历服务器拒绝访问（403），请核对同步地址、专用密码及日历授权".to_string(),
             404 => "服务器地址不对（404）".to_string(),
+            405 => "当前地址不支持日历同步（405），请核对平台提供的 CalDAV 地址".to_string(),
             407 => "网络需要代理认证（407）".to_string(),
             429 => "请求太频繁（429），稍后再试".to_string(),
             500..=599 => format!("服务器出错（{code}），稍后再试"),
@@ -345,6 +346,14 @@ fn dav(
     cfg: &Config,
     password: &str,
 ) -> Result<String, Failure> {
+    dav_response(agent,method,url,depth,body,cfg,password).map(|(xml,_)|xml)
+}
+
+/// 返回最终地址，让发现流程按重定向后的地址解析相对路径。
+fn dav_response(
+    agent: &ureq::Agent, method: &str, url: &str, depth: &str,
+    body: &str, cfg: &Config, password: &str,
+) -> Result<(String,String), Failure> {
     let base=url::Url::parse(&cfg.base()).map_err(|_|Failure::text("日历服务器地址无效"))?;
     let mut target=url::Url::parse(url).map_err(|_|Failure::text("日历地址无效"))?;
     for attempt in 0..4 {
@@ -365,7 +374,7 @@ fn dav(
                     .map_err(|_|Failure::text("日历重定向地址无效"))?;
             }
             Ok(r) if r.status()>=300=>return Err(Failure::status(cfg.provider,r.status())),
-            Ok(r)=>return r.into_string().map_err(|e|Failure::transport(&e.to_string())),
+            Ok(r)=>return r.into_string().map(|xml|(xml,target.to_string())).map_err(|e|Failure::transport(&e.to_string())),
             Err(ureq::Error::Status(code,_))=>return Err(Failure::status(cfg.provider,code)),
             Err(e)=>return Err(Failure::transport(&e.to_string())),
         }
@@ -375,7 +384,7 @@ fn dav(
 
 const PROPFIND_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
-  <d:prop><d:resourcetype/><d:displayname/><c:calendar-home-set/></d:prop>
+  <d:prop><d:resourcetype/><d:displayname/><d:current-user-principal/><c:calendar-home-set/></d:prop>
 </d:propfind>"#;
 
 fn report_body(start: &str, end: &str) -> String {
@@ -451,24 +460,44 @@ fn fetch_range(cfg: &Config, password: &str, lo: chrono::DateTime<chrono::Utc>, 
 
 fn discover(agent: &ureq::Agent, cfg: &Config, password: &str) -> Result<String, Failure> {
     let base = ensure_slash(cfg.base().trim());
-    let xml = dav(agent, "PROPFIND", &base, "1", PROPFIND_BODY, cfg, password)?;
-    if let Some(home) = calendar_home(&xml, &base) {
-        let home_xml = dav(agent, "PROPFIND", &ensure_slash(&home), "1", PROPFIND_BODY, cfg, password)?;
-        if let Some(cal) = pick_calendar(&home_xml, &home) {
-            return Ok(cal);
+    let root=path_of(&base)=="/";
+    match discover_at(agent,cfg,password,&base,"1") {
+        Ok(Some(calendar))=>return Ok(calendar),
+        Ok(None)=>{},
+        // 网站根目录不一定是 DAV 服务；这两个平台的根目录分别返回 405 / 403。
+        Err(error) if root && matches!(error.status,Some(403|404|405))=>{},
+        Err(error)=>return Err(error),
+    }
+    if root {
+        let well_known=join_url(&base,".well-known/caldav");
+        match discover_at(agent,cfg,password,&well_known,"0") {
+            Ok(Some(calendar))=>return Ok(calendar),
+            Ok(None)=>{},
+            Err(error) if matches!(error.status,Some(404|405))=>{},
+            Err(error)=>return Err(error),
         }
-    }
-    if let Some(cal) = pick_calendar(&xml, &base) {
-        return Ok(cal);
-    }
-    if path_of(&base) == "/" {
-        let alt = ensure_slash(&join_url(&base, "calendars/"));
-        let alt_xml = dav(agent, "PROPFIND", &alt, "1", PROPFIND_BODY, cfg, password)?;
-        if let Some(cal) = pick_calendar(&alt_xml, &alt) {
-            return Ok(cal);
+        if let Some(calendar)=discover_at(agent,cfg,password,&join_url(&base,"calendars/"),"1")? {
+            return Ok(calendar);
         }
     }
     Err(Failure::text("没有找到日历，请确认这个账号能在客户端里同步日程"))
+}
+
+fn discover_at(agent:&ureq::Agent,cfg:&Config,password:&str,start:&str,depth:&str)->Result<Option<String>,Failure>{
+    let mut next=start.to_owned();let mut depth=depth;
+    let mut visited=std::collections::HashSet::new();
+    for _ in 0..8 {
+        if !visited.insert(next.clone()){return Err(Failure::text("日历服务器返回了循环的发现地址"));}
+        let (xml,base)=dav_response(agent,"PROPFIND",&next,depth,PROPFIND_BODY,cfg,password)?;
+        visited.insert(base.clone());
+        if let Some(calendar)=pick_calendar(&xml,&base){return Ok(Some(calendar));}
+        if let Some(home)=calendar_home(&xml,&base).filter(|url|!visited.contains(url)) {
+            next=home;depth="1";
+        } else if let Some(principal)=property_href(&xml,"current-user-principal",&base).filter(|url|!visited.contains(url)) {
+            next=principal;depth="0";
+        } else {return Ok(None);}
+    }
+    Err(Failure::text("日历服务发现次数过多，请重新连接"))
 }
 
 // ---------------------------------------------------------------- XML
@@ -481,6 +510,8 @@ fn responses(xml: &str) -> Vec<(String, bool, bool)> {
     let Ok(href_re) = regex::Regex::new(r"(?is)<(?:[a-z0-9]+:)?href\b[^>]*>(.*?)</(?:[a-z0-9]+:)?href>") else {
         return Vec::new();
     };
+    let resource_type=regex::Regex::new(r"(?is)<(?:[a-z0-9]+:)?resourcetype\b[^>]*>(.*?)</(?:[a-z0-9]+:)?resourcetype>").unwrap();
+    let calendar_type=regex::Regex::new(r"(?is)<(?:[a-z0-9]+:)?calendar(?:\s[^>]*)?/?>").unwrap();
     block
         .captures_iter(xml)
         .filter_map(|cap| {
@@ -489,8 +520,7 @@ fn responses(xml: &str) -> Vec<(String, bool, bool)> {
             if href.is_empty() {
                 return None;
             }
-            let lower = inner.to_ascii_lowercase();
-            let is_calendar = lower.contains("calendar/") || lower.contains(":calendar") || lower.contains("<calendar");
+            let is_calendar = resource_type.captures_iter(inner).any(|kind|calendar_type.is_match(&kind[1]));
             let is_dir = href.ends_with('/');
             Some((href, is_calendar, is_dir))
         })
@@ -498,31 +528,34 @@ fn responses(xml: &str) -> Vec<(String, bool, bool)> {
 }
 
 fn calendar_home(xml: &str, base: &str) -> Option<String> {
-    let block = regex::Regex::new(r"(?is)<(?:[a-z0-9]+:)?calendar-home-set\b[^>]*>(.*?)</(?:[a-z0-9]+:)?calendar-home-set>").ok()?;
+    property_href(xml,"calendar-home-set",base)
+}
+
+fn property_href(xml:&str,property:&str,base:&str)->Option<String>{
+    let block = regex::Regex::new(&format!(r"(?is)<(?:[a-z0-9]+:)?{property}\b[^>]*>(.*?)</(?:[a-z0-9]+:)?{property}>")).ok()?;
     let href_re = regex::Regex::new(r"(?is)<(?:[a-z0-9]+:)?href\b[^>]*>(.*?)</(?:[a-z0-9]+:)?href>").ok()?;
     let inner = block.captures(xml)?.get(1)?.as_str();
     let href = href_re.captures(inner)?.get(1)?.as_str().trim();
     if href.is_empty() {
         return None;
     }
-    Some(join_url(base, &unescape_xml(href)))
+    url::Url::parse(base).ok()?.join(&unescape_xml(href)).ok().map(|url|url.to_string())
 }
 
-/// 从 207 里挑一个日历：跳过请求地址自己、跳过 principals，优先带 calendar
-/// 类型或 UUID 形状的地址。
+/// 只选择日历集合或已有的 UUID 兼容路径，不能把主目录/收件箱当成日历。
 fn pick_calendar(xml: &str, base: &str) -> Option<String> {
     let want = path_of(base).trim_end_matches('/').to_string();
     let mut best: Option<(u8, String)> = None;
     for (href, is_calendar, _) in responses(xml) {
-        let url = join_url(base, &href);
+        let Some(url) = url::Url::parse(base).ok().and_then(|base|base.join(&href).ok()).map(|url|url.to_string()) else {continue;};
         let path = path_of(&url).trim_end_matches('/').to_string();
-        if path == want || path.is_empty() {
+        if path.is_empty() || path == want && !is_calendar {
             continue;
         }
-        if path.contains("principals") || path.contains("calendar-home") {
+        if !is_calendar && (path.contains("principals") || path.contains("calendar-home")) {
             continue;
         }
-        let score = if is_calendar { 3 } else if looks_like_uuid(path.rsplit('/').next().unwrap_or("")) { 2 } else { 1 };
+        let score = if is_calendar { 3 } else if looks_like_uuid(path.rsplit('/').next().unwrap_or("")) { 2 } else { continue; };
         if best.as_ref().map_or(true, |(s, _)| score > *s) {
             best = Some((score, url));
         }
@@ -822,6 +855,103 @@ pub fn human_error(provider: Provider, status: Option<u16>) -> String {
 
 #[cfg(test)]
 mod tests {
+    fn read_discovery_request(stream:&mut std::net::TcpStream)->String {
+        use std::io::Read;
+        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut bytes=Vec::new();
+        loop {
+            let mut buffer=[0;4096];let n=stream.read(&mut buffer).unwrap();
+            if n==0 {break;} bytes.extend_from_slice(&buffer[..n]);
+            let text=String::from_utf8_lossy(&bytes);
+            if let Some(end)=text.find("\r\n\r\n") {
+                let length=text[..end].lines().find_map(|line|line.to_ascii_lowercase().strip_prefix("content-length:").and_then(|v|v.trim().parse::<usize>().ok())).unwrap_or(0);
+                if bytes.len()>=end+4+length {break;}
+            }
+        }
+        String::from_utf8(bytes).unwrap()
+    }
+    #[test]
+    fn discovery_root_errors_follow_well_known_principal_and_home() {
+        use std::io::{Read,Write};
+        use std::net::TcpListener;
+        for (provider, code) in [(Provider::DingTalk,405),(Provider::WeCom,403)] {
+            let listener=TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let base=format!("http://{}/",listener.local_addr().unwrap());
+            let (stop_tx,stop_rx)=std::sync::mpsc::channel();
+            let worker=std::thread::spawn(move || {
+                let mut paths=Vec::new();
+                while stop_rx.try_recv().is_err() {
+                    let Ok((mut stream,_))=listener.accept() else {std::thread::sleep(Duration::from_millis(5));continue;};
+                    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                    let mut request=String::new();
+                    while !request.contains("\r\n\r\n") {
+                        let mut buf=[0;4096];let n=stream.read(&mut buf).unwrap();if n==0{break;}
+                        request.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    }
+                    let path=request.split_whitespace().nth(1).unwrap().to_owned();paths.push(path.clone());
+                    let (status,extra,body)=match path.as_str() {
+                        "/"=>(code,"",""),
+                        "/.well-known/caldav"=>(302,"Location: /dav/principals/\r\n",""),
+                        "/dav/principals/"=>(207,"",r#"<d:multistatus xmlns:d="DAV:"><d:response><d:href>/dav/principals/</d:href><d:propstat><d:prop><d:current-user-principal><d:href>account/</d:href></d:current-user-principal></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#),
+                        "/dav/principals/account/"=>(207,"",r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:response><d:href>/dav/principals/account/</d:href><d:propstat><d:prop><c:calendar-home-set><d:href>../../calendars/account/</d:href></c:calendar-home-set></d:prop></d:propstat></d:response></d:multistatus>"#),
+                        "/dav/calendars/account/"=>(207,"",r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:response><d:href>/dav/calendars/account/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response><d:response><d:href>primary/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/><c:calendar/></d:resourcetype></d:prop></d:propstat></d:response></d:multistatus>"#),
+                        _=>(404,"","")
+                    };
+                    write!(stream,"HTTP/1.1 {status} Test\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+                }
+                paths
+            });
+            let cfg=Config{provider,username:"synthetic".into(),href:None,server:Some(base.clone())};
+            let result=discover(&agent(),&cfg,"synthetic-password");
+            stop_tx.send(()).unwrap();let paths=worker.join().unwrap();
+            assert_eq!(result.unwrap(),format!("{base}dav/calendars/account/primary/"));
+            assert_eq!(paths,vec!["/","/.well-known/caldav","/dav/principals/","/dav/principals/account/","/dav/calendars/account/"]);
+        }
+    }
+
+    #[test]
+    fn discovery_only_selects_calendar_collections_including_self() {
+        let xml=r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:response><d:href>/dav/account/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype><c:calendar-home-set><d:href>/dav/home/</d:href></c:calendar-home-set></d:prop></d:propstat></d:response></d:multistatus>"#;
+        assert_eq!(pick_calendar(xml,"https://example.com/"),None,"日历主目录属性不能被当成日历集合类型");
+        let calendar=xml.replace("<d:collection/>","<d:collection/><c:calendar/>");
+        assert_eq!(pick_calendar(&calendar,"https://example.com/dav/account/"),Some("https://example.com/dav/account/".into()));
+    }
+
+    #[test]
+    fn discovery_authentication_failure_does_not_probe_other_paths() {
+        use std::io::Write;use std::net::TcpListener;
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();
+        let base=format!("http://{}/",listener.local_addr().unwrap());
+        let worker=std::thread::spawn(move || {
+            let (mut stream,_)=listener.accept().unwrap();let _=read_discovery_request(&mut stream);
+            write!(stream,"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            drop(stream);listener
+        });
+        let cfg=Config{provider:Provider::DingTalk,username:"synthetic".into(),href:None,server:Some(base)};
+        let client=ureq::AgentBuilder::new().timeout(Duration::from_millis(200)).build();
+        assert_eq!(discover(&client,&cfg,"wrong").unwrap_err().status,Some(401));
+        let listener=worker.join().unwrap();listener.set_nonblocking(true).unwrap();
+        assert!(listener.accept().is_err());
+    }
+
+    #[test]
+    fn discovery_principal_cannot_send_credentials_to_another_origin() {
+        use std::io::Write;use std::net::TcpListener;
+        let foreign=TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();
+        let base=format!("http://{}/",listener.local_addr().unwrap());
+        let foreign_url=format!("http://{}/account/",foreign.local_addr().unwrap());
+        let worker=std::thread::spawn(move || {
+            let (mut stream,_)=listener.accept().unwrap();let _=read_discovery_request(&mut stream);
+            let body=format!("<d:current-user-principal xmlns:d=\"DAV:\"><d:href>{foreign_url}</d:href></d:current-user-principal>");
+            write!(stream,"HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+        });
+        let cfg=Config{provider:Provider::WeCom,username:"synthetic".into(),href:None,server:Some(base)};
+        assert!(discover(&agent(),&cfg,"synthetic-password").unwrap_err().message.contains("不可信"));
+        worker.join().unwrap();foreign.set_nonblocking(true).unwrap();assert!(foreign.accept().is_err());
+    }
+
     #[test]
     fn quality_dav_never_sends_credentials_to_an_unrelated_origin() {
         use std::net::TcpListener;
@@ -913,6 +1043,16 @@ mod tests {
         let month=fetch_month(&cfg,&password,chrono::Local::now().date_naive()).expect("月份同步失败");
         let today=chrono::Local::now().date_naive();
         println!("day_events={} month_events={} today_events={}",day.events.len(),month.events.len(),month.events.iter().filter(|m|chrono::DateTime::from_timestamp(m.start,0).unwrap().with_timezone(&chrono::Local).date_naive()==today).count());
+    }
+
+    #[test]
+    #[ignore="显式验证已连接账号重新发现日历，不输出账号或日程内容"]
+    fn live_calendar_discovery_read_only_probe(){
+        let mut cfg=load_config().expect("尚未保存日历连接");
+        let password=secrets::load(&cfg).expect("日历凭据不可用");
+        cfg.href=None;
+        let fetched=fetch(&cfg,&password).expect("重新发现及查询日历失败");
+        assert!(!fetched.href.is_empty());
     }
 
     #[test]
