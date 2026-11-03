@@ -39,7 +39,10 @@ function Assert-Installed {
     if ($Desktop) { $paths += $desktopLink }
     foreach ($path in $paths) {
         if (-not (Test-Path -LiteralPath $path)) { throw "快捷方式不存在：$path" }
-        $actual = $shell.CreateShortcut($path).TargetPath
+        # WScript 在英文系统上读取中文快捷方式文件名时可能返回空目标；复制原始文件后检查同一份内容。
+        $probe = Join-Path $root 'shortcut-probe.lnk'
+        Copy-Item -LiteralPath $path -Destination $probe -Force
+        $actual = $shell.CreateShortcut($probe).TargetPath
         $expected = Join-Path $installed 'daozai.exe'
         if (-not (Test-Path -LiteralPath $actual) -or (Get-Item -LiteralPath $actual).FullName -ne (Get-Item -LiteralPath $expected).FullName) { throw "快捷方式目标不正确：$actual；预期：$expected" }
     }
