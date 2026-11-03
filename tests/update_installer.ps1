@@ -1,11 +1,14 @@
 # 使用独立目录和最小测试程序验证更新，不启动或替换日常使用的岛仔。
+param([switch]$EncryptedCache)
 $ErrorActionPreference = 'Stop'
 $project = Split-Path $PSScriptRoot -Parent
 $testRoot = Join-Path $project ('target\update-test-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $testRoot | Out-Null
 $oldLocal = $env:LOCALAPPDATA
 try {
-    $env:LOCALAPPDATA = Join-Path $testRoot 'local'
+    $env:LOCALAPPDATA = if ($EncryptedCache) { Join-Path $oldLocal ('DaozaiUpdateTest-' + [Guid]::NewGuid().ToString('N')) } else { Join-Path $testRoot 'local' }
+    New-Item -ItemType Directory -Path $env:LOCALAPPDATA -Force | Out-Null
+    if ($EncryptedCache -and -not ((Get-Item -LiteralPath $env:LOCALAPPDATA).Attributes -band [IO.FileAttributes]::Encrypted)) { throw '测试缓存目录必须启用 EFS 加密' }
     $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
     $source = Join-Path $testRoot 'fixture.cs'
     '[assembly:System.Reflection.AssemblyFileVersion("9.8.7")] class Fixture { static void Main() { System.IO.File.WriteAllText(System.IO.Path.Combine(System.AppDomain.CurrentDomain.BaseDirectory,"started.txt"),"ok"); } }' | Set-Content -LiteralPath $source

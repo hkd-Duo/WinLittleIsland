@@ -43,7 +43,9 @@ try {
         if ($parent -and -not $parent.WaitForExit(60000)) { throw '岛仔尚未退出，请稍后重试。' }
     }
     $exited = $true
-    [IO.File]::Replace($staged, $target, $backup)
+    # 缓存可能启用 EFS；先复制备份，避免原子替换时跨加密边界移动旧程序。
+    [IO.File]::Copy($target, $backup, $true)
+    [IO.File]::Replace($staged, $target, [NullString]::Value)
     $replaced = $true
     Start-Process -FilePath $target -WorkingDirectory $targetDir -WindowStyle Hidden
     $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Daozai'
