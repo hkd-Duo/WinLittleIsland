@@ -11,7 +11,7 @@ impl crate::app::App {
         let default=if self.settings.show_battery {DEFAULT_ORDER.to_vec()}else{vec![QUOTA,PET,CLOCK,BATTERY,MUSIC,FOCUS]};
         let mut order=if valid_order(&self.settings.resident_order){self.settings.resident_order.clone()}else{default.clone()};
         ui.horizontal(|ui|{
-            ui.label(RichText::new("拖动岛上的图标").color(Color32::WHITE));
+            ui.label(RichText::new("拖动岛上的图标").color(ui.visuals().text_color()));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
                 if ui.small_button("恢复默认").clicked(){self.settings.resident_order.clear();order=default;}
             });
@@ -67,6 +67,6 @@ impl crate::app::App {
         }
         ui.painter().text(Pos2::new(stage.center().x,stage.bottom()-22.0),egui::Align2::CENTER_CENTER,"按住图标左右拖动",theme::font(11.0,W::Regular),Color32::from_gray(160));
         ui.add_space(8.0);
-        ui.label(RichText::new("灰色图标为暂未显示的组件；位置会保留。").size(11.0).color(Color32::from_gray(160)));
+        ui.label(RichText::new("灰色图标为暂未显示的组件；位置会保留。").size(11.0).color(ui.visuals().weak_text_color()));
     }
 }

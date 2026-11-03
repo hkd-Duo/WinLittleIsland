@@ -43,16 +43,16 @@ pub fn observe(ctx:eframe::egui::Context,initial:Snapshot,input:Option<crate::in
     std::thread::Builder::new().name("daozai-system".into()).spawn(move||{
         let mut current=Observation{system:initial,input,fullscreen:false};
         let mut delivered=current.clone();
-        let mut sampled=std::time::Instant::now()-std::time::Duration::from_secs(1);
+        let mut sampled=crate::poll_clock::PollClock::default();
         let mut input_at=sampled;
         loop {
             let identity=crate::input::State::identity();
             let changed=identity.map(|state|(state.context,state.layout))!=current.input.map(|state|(state.context,state.layout));
-            if changed || crate::input::switch_recent() || input_at.elapsed()>=std::time::Duration::from_secs(1){
-                current.input=crate::input::State::read();input_at=std::time::Instant::now();
+            if changed || crate::input::switch_recent() || input_at.ready(std::time::Duration::from_secs(1)){
+                current.input=crate::input::State::read();input_at=crate::poll_clock::PollClock::now();
             }
-            if sampled.elapsed()>=std::time::Duration::from_millis(500){
-                current.system=Snapshot::read();current.fullscreen=fullscreen();sampled=std::time::Instant::now();
+            if sampled.ready(std::time::Duration::from_millis(500)){
+                current.system=Snapshot::read();current.fullscreen=fullscreen();sampled=crate::poll_clock::PollClock::now();
             }
             if current!=delivered {
                 match tx.try_send(current.clone()) {

@@ -1,6 +1,6 @@
 [package]
 name = "daozai"
-version = "0.6.40"
+version = "0.6.47"
 edition = "2021"
 license = "MIT"
 description = "岛仔：Windows 顶部的桌面伙伴与信息岛"
@@ -34,6 +34,7 @@ egui_extras = { version = "0.31", default-features = false, features = ["svg"] }
 ureq = { version = "2.12", default-features = false, features = ["tls", "gzip"] }
 serde_json = "1"
 base64 = "0.22"
+flate2 = "1"
 ring = "0.17"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 raw-window-handle = "0.6"
@@ -56,6 +57,7 @@ windows = { version = "0.58", features = [
   "Win32_Graphics_Gdi",
   "Win32_System_LibraryLoader",
   "Win32_System_Com",
+  "Win32_System_DataExchange",
   "Win32_Security",
   "Win32_Security_Cryptography",
   "Win32_System_Power",

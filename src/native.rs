@@ -12,7 +12,8 @@
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use crate::poll_clock::PollClock;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject, SetWindowRgn};
 use windows::Win32::System::Threading::GetCurrentProcessId;
@@ -180,7 +181,7 @@ pub struct Window {
     region: (i32, i32, i32, i32),
     expanded: bool,
     hook: HWINEVENTHOOK,
-    browser_state: (Option<bool>,Instant),
+    browser_state: (Option<bool>,PollClock),
     drag_capture: DragCapture,
 }
 
@@ -201,12 +202,12 @@ impl Window {
                 WINEVENT_OUTOFCONTEXT,
             )
         };
-        Some(Self { hwnd, region: (0, 0, 0, 0), expanded: false, hook, browser_state:(None,Instant::now()-Duration::from_millis(100)), drag_capture:DragCapture::default() })
+        Some(Self { hwnd, region: (0, 0, 0, 0), expanded: false, hook, browser_state:(None,PollClock::default()), drag_capture:DragCapture::default() })
     }
 
     pub fn browser_at_top(&mut self)->Option<bool> {
-        if self.browser_state.1.elapsed()>=Duration::from_millis(100) {
-            self.browser_state=(crate::system::browser_at_top(self.hwnd),Instant::now());
+        if self.browser_state.1.ready(Duration::from_millis(100)) {
+            self.browser_state=(crate::system::browser_at_top(self.hwnd),PollClock::now());
         }
         self.browser_state.0
     }
@@ -315,7 +316,7 @@ mod tests {
             assert!(above(cover.0,island.0),"先复现其他窗口盖住岛体");
             let foreground=GetForegroundWindow();
             let saved=hit().lock().unwrap_or_else(|e|e.into_inner()).clone();
-            let mut native=Window{hwnd:island.0,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,Instant::now()),drag_capture:DragCapture::default()};
+            let mut native=Window{hwnd:island.0,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default()};
             let update=|native:&mut Window,expanded|native.update((0.0,0.0,416.0,140.0),(0.0,0.0,416.0,140.0),None,None,1.0,false,expanded);
             update(&mut native,true);
             assert!(above(island.0,cover.0),"展开时必须重新抬高实际窗口层级，不能只检查置顶标记");

@@ -1,11 +1,13 @@
-//! 日历（v0.5.6）：飞书 / 钉钉 / 企业微信的 CalDAV 只读接入。
+//! 日历：飞书 / 钉钉 CalDAV 与企业微信 Exchange ActiveSync 只读接入。
 //!
 //! `PROPFIND` 找日历（uuid），`REPORT calendar-query` 分别查询提醒窗口与所选月份，
-//! 再复用 `mail::meetings_of` 解析 VEVENT。三家都是 Basic Auth，
+//! 企业微信使用 FolderSync / Sync；复用 VEVENT 解析与重复日程展开。认证使用 Basic Auth，
 //! 没有 OAuth、没有回调，用户在客户端自己生成账号密码即可。
 //!
 //! 硬约束：只读；凭据只进 Windows 凭据管理器（`keyring`，和邮件同一套库），
 //! 配置文件里只有平台、用户名、日历地址；不落盘正文、不进日志。
+
+mod exchange;
 
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
@@ -46,12 +48,12 @@ impl Provider {
         }
     }
 
-    /// 三家公开的 CalDAV 入口，界面上只读显示。
+    /// 平台同步入口，界面上只读显示。
     pub fn server(self) -> &'static str {
         match self {
             Provider::Feishu => "https://caldav.feishu.cn/calendars/",
             Provider::DingTalk => "https://calendar.dingtalk.com",
-            Provider::WeCom => "https://caldav.wecom.work",
+            Provider::WeCom => "https://wecom.work",
         }
     }
 
@@ -71,7 +73,7 @@ impl Provider {
             Provider::WeCom => [
                 "手机端 工作台 → 日程",
                 "右上角「三」→ 日程设置",
-                "同步至其他日历 → 生成，复制用户名和密码",
+                "同步至其他日历（Exchange）→ 复制完整用户名及生成的密码",
             ],
         }
     }
@@ -111,9 +113,31 @@ pub fn load_config() -> Option<Config> {
     decode_config(&std::fs::read(config_path()).ok()?)
 }
 
+pub fn load_configs() -> Vec<Config> {
+    let Ok(raw) = std::fs::read(config_path()) else { return vec![]; };
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&raw) else { return vec![]; };
+    if let Some(accounts) = json.get("accounts").and_then(|v| v.as_array()) {
+        accounts.iter().filter_map(|v| decode_config(v.to_string().as_bytes())).collect()
+    } else {
+        decode_config(&raw).into_iter().collect()
+    }
+}
+
+pub fn selected_provider() -> Provider {
+    std::fs::read(config_path()).ok()
+        .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+        .and_then(|json| json.get("active").or_else(|| json.get("provider")).and_then(|v| v.as_str()).map(Provider::parse))
+        .unwrap_or_default()
+}
+
 /// 纯解析：只有平台、用户名、日历地址，没有任何密码字段。
 pub fn decode_config(raw: &[u8]) -> Option<Config> {
     let json: serde_json::Value = serde_json::from_slice(raw).ok()?;
+    if let Some(accounts) = json.get("accounts").and_then(|v| v.as_array()) {
+        let active = json.get("active")?.as_str()?;
+        return accounts.iter().filter_map(|v| decode_config(v.to_string().as_bytes()))
+            .find(|cfg| cfg.provider.key() == active);
+    }
     let username = json.get("username")?.as_str()?.trim().to_string();
     if username.is_empty() {
         return None;
@@ -137,10 +161,20 @@ pub fn encode_config(cfg: &Config) -> Vec<u8> {
 }
 
 pub fn save_config(cfg: &Config) -> Result<(), String> {
-    let data = encode_config(cfg);
-    if data.is_empty() {
-        return Err("配置序列化失败".into());
+    let mut accounts = load_configs();
+    if let Some(saved) = accounts.iter_mut().find(|saved| saved.provider == cfg.provider) {
+        *saved = cfg.clone();
+    } else {
+        accounts.push(cfg.clone());
     }
+    save_configs(&accounts, cfg.provider)
+}
+
+fn save_configs(accounts: &[Config], active: Provider) -> Result<(), String> {
+    let accounts: Vec<serde_json::Value> = accounts.iter()
+        .map(|cfg| serde_json::from_slice(&encode_config(cfg)).expect("日历配置可以序列化")).collect();
+    let data = serde_json::to_vec(&serde_json::json!({"active": active.key(), "accounts": accounts}))
+        .map_err(|e| format!("配置序列化失败：{e}"))?;
     let path = config_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败：{e}"))?;
@@ -148,8 +182,14 @@ pub fn save_config(cfg: &Config) -> Result<(), String> {
     crate::model::atomic_write(&path, &data).map_err(|e| format!("写配置失败：{e}"))
 }
 
+pub fn select_provider(provider: Provider) -> Result<(), String> {
+    save_configs(&load_configs(), provider)
+}
+
 /// 新连接完整保存后才移除旧凭据；配置保存失败时恢复原凭据。
 pub fn save_connection(cfg: &Config, password: &str, old: Option<&Config>) -> Result<(), String> {
+    let saved = load_configs().into_iter().find(|saved| saved.provider == cfg.provider);
+    let old = saved.as_ref().or(old.filter(|old| old.provider == cfg.provider));
     let same_account = old.is_some_and(|old|
         old.provider == cfg.provider && old.username.eq_ignore_ascii_case(&cfg.username));
     let previous_password = secrets::load(cfg).ok();
@@ -170,8 +210,11 @@ pub fn save_connection(cfg: &Config, password: &str, old: Option<&Config>) -> Re
     Ok(())
 }
 
-pub fn forget_config() {
-    let _ = std::fs::remove_file(config_path());
+pub fn forget_config() -> Result<(), String> {
+    let Some(active) = load_config() else { return Ok(()); };
+    let mut accounts = load_configs();
+    accounts.retain(|cfg| cfg.provider != active.provider);
+    save_configs(&accounts, active.provider)
 }
 
 // ---------------------------------------------------------------- 凭据
@@ -387,11 +430,16 @@ const PROPFIND_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
   <d:prop><d:resourcetype/><d:displayname/><d:current-user-principal/><c:calendar-home-set/></d:prop>
 </d:propfind>"#;
 
-fn report_body(start: &str, end: &str) -> String {
+fn calendar_data_request(_provider: Provider, start: &str, end: &str) -> String {
+    format!(r#"<c:calendar-data><c:expand start="{start}" end="{end}"/></c:calendar-data>"#)
+}
+
+fn report_body(provider: Provider, start: &str, end: &str) -> String {
+    let data=calendar_data_request(provider,start,end);
     format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
 <c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
-  <d:prop><c:calendar-data><c:expand start="{start}" end="{end}"/></c:calendar-data></d:prop>
+  <d:prop><d:getetag/>{data}</d:prop>
   <c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT">
     <c:time-range start="{start}" end="{end}"/>
   </c:comp-filter></c:comp-filter></c:filter>
@@ -429,6 +477,7 @@ pub fn fetch_month(cfg: &Config, password: &str, month: NaiveDate) -> Result<Fet
 }
 
 fn fetch_range(cfg: &Config, password: &str, lo: chrono::DateTime<chrono::Utc>, hi: chrono::DateTime<chrono::Utc>) -> Result<Fetched, Failure> {
+    if cfg.provider == Provider::WeCom { return exchange::fetch(cfg, password, lo, hi); }
     let agent = agent();
     let href = match &cfg.href {
         Some(h) => h.clone(),
@@ -436,26 +485,45 @@ fn fetch_range(cfg: &Config, password: &str, lo: chrono::DateTime<chrono::Utc>, 
     };
     let start = lo.format("%Y%m%dT%H%M%SZ").to_string();
     let end = hi.format("%Y%m%dT%H%M%SZ").to_string();
-    let mut xml = dav(&agent, "REPORT", &href, "1", &report_body(&start, &end), cfg, password)?;
+    let mut xml = dav(&agent, "REPORT", &href, "1", &report_body(cfg.provider, &start, &end), cfg, password)?;
     if report_status_error(&xml).is_some() || (calendar_data(&xml).is_empty() && !responses(&xml).is_empty()) {
-        // 飞书的 calendar-query 只列出资源，需用 calendar-multiget 读取正文。
-        let base=url::Url::parse(&href).map_err(|_|Failure::text("日历地址无效"))?;
-        let mut refs=String::new();
-        for (resource,_,_) in responses(&xml) {
-            let target=base.join(&resource).map_err(|_|Failure::text("日程地址无效"))?;
-            if target.origin()!=base.origin() || target.path()==base.path() || target.path().ends_with('/') {
-                return Err(Failure::text("服务器没有返回可读取的日程资源"));
+        // 有的服务只列资源，或在查询结果中附带集合本身；集合不能当成日程读取。
+        if let Some(code @ (401|403))=report_status_error(&xml){return Err(Failure::status(cfg.provider,code));}
+        let mut refs=report_resource_refs(&xml,&href)?;
+        if refs.is_empty() {
+            let listing=dav(&agent,"PROPFIND",&href,"1",PROPFIND_BODY,cfg,password)?;
+            if let Some(code @ (401|403))=report_status_error(&listing){return Err(Failure::status(cfg.provider,code));}
+            refs=report_resource_refs(&listing,&href)?;
+            if refs.is_empty() {
+                if let Some(code)=report_status_error(&xml){return Err(Failure::status(cfg.provider,code));}
+                return Ok(Fetched{href,events:vec![]});
             }
-            let escaped=target.path().replace('&',"&amp;").replace('<',"&lt;").replace('>',"&gt;");
-            refs.push_str(&format!("<d:href>{escaped}</d:href>"));
         }
-        if refs.is_empty(){return Err(Failure::text("服务器未返回日程内容，请检查日历读取权限"));}
-        let body=format!(r#"<c:calendar-multiget xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:calendar-data><c:expand start="{start}" end="{end}"/></c:calendar-data></d:prop>{refs}</c:calendar-multiget>"#);
+        let data=calendar_data_request(cfg.provider,&start,&end);
+        let body=format!(r#"<c:calendar-multiget xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><d:getetag/>{data}</d:prop>{refs}</c:calendar-multiget>"#);
         xml=dav(&agent,"REPORT",&href,"1",&body,cfg,password)?;
+        if calendar_data(&xml).is_empty() && report_status_error(&xml).is_none() {
+            return Err(Failure::text("服务器未返回日程内容，请检查日历读取权限"));
+        }
     }
     if let Some(code)=report_status_error(&xml){return Err(Failure::status(cfg.provider,code));}
     let events=events_in_range(&xml,lo,hi)?;
     Ok(Fetched { href, events })
+}
+
+fn report_resource_refs(xml:&str,href:&str)->Result<String,Failure> {
+    let base=url::Url::parse(href).map_err(|_|Failure::text("日历地址无效"))?;
+    let mut refs=String::new();
+    for (resource,is_calendar,_) in responses(xml) {
+        let target=base.join(&resource).map_err(|_|Failure::text("日程地址无效"))?;
+        if target.origin()!=base.origin() || !target.username().is_empty() || target.password().is_some() {
+            return Err(Failure::text("日历返回了不可信地址，请重新连接"));
+        }
+        if is_calendar || target.path().trim_end_matches('/')==base.path().trim_end_matches('/') {continue;}
+        let escaped=target[url::Position::BeforePath..url::Position::AfterQuery].replace('&',"&amp;").replace('<',"&lt;").replace('>',"&gt;");
+        refs.push_str(&format!("<d:href>{escaped}</d:href>"));
+    }
+    Ok(refs)
 }
 
 fn discover(agent: &ureq::Agent, cfg: &Config, password: &str) -> Result<String, Failure> {
@@ -700,8 +768,8 @@ fn looks_like_uuid(s: &str) -> bool {
 
 #[derive(Clone)]
 pub enum Cmd {
-    /// 配置变化（None = 关闭）。
-    Configure(Option<Config>, bool),
+    /// 配置变化（空列表 = 关闭）。
+    Configure(Vec<Config>, bool),
     /// 立即同步一次。
     SyncNow,
     ViewMonth(NaiveDate),
@@ -734,7 +802,7 @@ impl Service {
         Self { cmd: cmd_tx, ev: ev_rx }
     }
 
-    pub fn configure(&self, cfg: Option<Config>, auto_sync: bool) {
+    pub fn configure(&self, cfg: Vec<Config>, auto_sync: bool) {
         let _ = self.cmd.send(Cmd::Configure(cfg, auto_sync));
     }
 
@@ -760,7 +828,7 @@ fn run(cmd_rx: Receiver<Cmd>, ev: Sender<Event>) {
 }
 
 fn run_with(cmd_rx: Receiver<Cmd>, ev: Sender<Event>, interval: Duration, mut sync: impl FnMut(&Config, Option<NaiveDate>, &Sender<Event>)) {
-    let mut cfg: Option<Config> = None;
+    let mut cfg: Vec<Config> = Vec::new();
     let mut auto_sync = true;
     let mut next: Option<Instant> = None;
     let mut month = None;
@@ -772,11 +840,11 @@ fn run_with(cmd_rx: Receiver<Cmd>, ev: Sender<Event>, interval: Duration, mut sy
         let mut dirty = false;
         match message {
             Ok(Cmd::Configure(c, enabled)) => {
-                dirty = c.is_some() && (c != cfg || enabled && !auto_sync);
+                dirty = !c.is_empty() && (c != cfg || enabled && !auto_sync);
                 cfg = c;
                 auto_sync = enabled;
-                if !auto_sync || cfg.is_none() { next = None; }
-                if cfg.is_none() { month = None; }
+                if !auto_sync || cfg.is_empty() { next = None; }
+                if cfg.is_empty() { month = None; }
             }
             Ok(Cmd::SyncNow) => dirty = true,
             Ok(Cmd::ViewMonth(date)) => { month = Some(month_start(date)); dirty = true; }
@@ -803,10 +871,8 @@ fn run_with(cmd_rx: Receiver<Cmd>, ev: Sender<Event>, interval: Duration, mut sy
         if !dirty {
             continue;
         }
-        let Some(c) = cfg.clone() else {
-            continue;
-        };
-        sync(&c, month, &ev);
+        if cfg.is_empty() { continue; }
+        for c in &cfg { sync(c, month, &ev); }
         next = auto_sync.then(|| Instant::now() + interval);
     }
 }
@@ -855,6 +921,16 @@ pub fn human_error(provider: Provider, status: Option<u16>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wecom_uses_exchange_endpoint() {
+        assert_eq!(Provider::WeCom.server(), "https://wecom.work");
+    }
+    #[test]
+    fn calendar_resource_refs_accept_object_slashes_and_skip_collection_metadata() {
+        let xml=r#"<d:multistatus><d:response><d:href>/calendar/</d:href><d:resourcetype><d:collection/><c:calendar/></d:resourcetype></d:response><d:response><d:href>/calendar/event/?id=1&amp;version=2</d:href></d:response></d:multistatus>"#;
+        assert_eq!(report_resource_refs(xml,"https://caldav.wecom.work/calendar/").unwrap(),"<d:href>/calendar/event/?id=1&amp;version=2</d:href>");
+        assert!(report_resource_refs("<response><href>https://other.example/item.ics</href></response>","https://caldav.wecom.work/calendar/").is_err());
+    }
     fn read_discovery_request(stream:&mut std::net::TcpStream)->String {
         use std::io::Read;
         stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
@@ -1015,7 +1091,7 @@ mod tests {
     #[test]
     fn recurring_all_day_and_overnight_overlap_query_start() {
         let lo=NaiveDate::from_ymd_opt(2026,11,4).unwrap().and_hms_opt(0,0,0).unwrap().and_local_timezone(chrono::Local).earliest().unwrap().with_timezone(&chrono::Utc);
-        let xml="<c:calendar-data>BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:all-day\nDTSTART;VALUE=DATE:20261103\nDTEND;VALUE=DATE:20261104\nRRULE:FREQ=DAILY;COUNT=3\nEND:VEVENT\nBEGIN:VEVENT\nUID:overnight\nDTSTART;TZID=Asia/Shanghai:20261103T233000\nDTEND;TZID=Asia/Shanghai:20261104T003000\nRRULE:FREQ=DAILY;COUNT=2\nEND:VEVENT\nEND:VCALENDAR</c:calendar-data>";
+        let xml="<c:calendar-data>BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:all-day\nDTSTART;VALUE=DATE:20261103\nDTEND;VALUE=DATE:20261104\nRRULE:FREQ=DAILY;COUNT=3\nEND:VEVENT\nBEGIN:VEVENT\nUID:overnight\nDTSTART:20261103T233000\nDTEND:20261104T003000\nRRULE:FREQ=DAILY;COUNT=2\nEND:VEVENT\nEND:VCALENDAR</c:calendar-data>";
         let events=events_in_range(xml,lo,lo+chrono::Duration::days(1)).unwrap();
         assert_eq!(events.iter().filter(|m|m.all_day).count(),1);
         assert_eq!(events.iter().filter(|m|m.uid=="overnight").count(),2);
@@ -1038,11 +1114,14 @@ mod tests {
     #[test]
     #[ignore="显式执行已连接日历的只读实测"]
     fn live_calendar_read_only_probe(){
-        let cfg=load_config().expect("尚未保存日历连接");let password=secrets::load(&cfg).expect("日历凭据不可用");
+        let configs=load_configs();assert!(!configs.is_empty(),"尚未保存日历连接");
+        for cfg in configs {
+        let password=secrets::load(&cfg).expect("日历凭据不可用");
         let day=fetch(&cfg,&password).expect("提醒窗口同步失败");
         let month=fetch_month(&cfg,&password,chrono::Local::now().date_naive()).expect("月份同步失败");
         let today=chrono::Local::now().date_naive();
-        println!("day_events={} month_events={} today_events={}",day.events.len(),month.events.len(),month.events.iter().filter(|m|chrono::DateTime::from_timestamp(m.start,0).unwrap().with_timezone(&chrono::Local).date_naive()==today).count());
+        println!("provider={} day_events={} month_events={} today_events={}",cfg.provider.key(),day.events.len(),month.events.len(),month.events.iter().filter(|m|chrono::DateTime::from_timestamp(m.start,0).unwrap().with_timezone(&chrono::Local).date_naive()==today).count());
+        }
     }
 
     #[test]
@@ -1094,6 +1173,7 @@ mod tests {
                     }
                     let request=String::from_utf8(buf).unwrap();
                     assert!(request.contains(if index==0 {"calendar-query"} else {"calendar-multiget"}));
+                    assert!(request.contains("<d:getetag/>"),"钉钉要求查询与批量读取同时请求 ETag，否则返回 400");
                     if index==1 {assert!(request.contains("<d:href>/calendar/item.ics</d:href>"));}
                     let data=if index==1 && succeeds {"BEGIN:VCALENDAR&#xD;&#xA;BEGIN:VEVENT&#xD;&#xA;UID:test&#xD;&#xA;SUMMARY:测试&#xD;&#xA;DTSTART:20261103T032000Z&#xD;&#xA;RRULE:FREQ=DAILY;COUNT=2&#xD;&#xA;END:VEVENT&#xD;&#xA;END:VCALENDAR"} else {""};
                     let status=if data.is_empty(){404}else{200};
@@ -1102,6 +1182,44 @@ mod tests {
                 }
             });
             let cfg=Config{provider:Provider::Feishu,username:"demo".into(),href:Some(format!("{base}calendar/")),server:Some(base)};
+            let result=fetch_month(&cfg,"test",NaiveDate::from_ymd_opt(2026,11,3).unwrap());
+            if succeeds {assert_eq!(result.unwrap().events.len(),2);} else {assert!(result.is_err());}
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn caldav_collection_listing_reads_slash_objects_and_recurring_events() {
+        use std::{io::Write,net::TcpListener};
+        for succeeds in [true,false] {
+            let listener=TcpListener::bind("127.0.0.1:0").unwrap();
+            let base=format!("http://{}/",listener.local_addr().unwrap());
+            let server=std::thread::spawn(move||{
+                for index in 0..3 {
+                    let (mut socket,_)=listener.accept().unwrap();
+                    socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                    let mut buf=Vec::new();let mut chunk=[0u8;4096];
+                    loop {
+                        let n=socket.read(&mut chunk).unwrap();assert!(n>0);buf.extend_from_slice(&chunk[..n]);
+                        if let Some(pos)=buf.windows(4).position(|s|s==b"\r\n\r\n") {
+                            let head=String::from_utf8_lossy(&buf[..pos]);
+                            let len=head.lines().find_map(|l|l.to_ascii_lowercase().strip_prefix("content-length:").map(|v|v.trim().parse::<usize>().unwrap())).unwrap_or(0);
+                            if buf.len()>=pos+4+len {break;}
+                        }
+                    }
+                    let request=String::from_utf8(buf).unwrap();
+                    assert!(request.contains(if index==0 {"calendar-query"} else if index==1 {"PROPFIND"} else {"calendar-multiget"}));
+                    if index != 1 { assert!(request.contains("<c:expand")); }
+                    if index==2 {assert!(request.contains("<d:href>/calendar/item/</d:href>"));}
+                    let data=if index==2 && succeeds {"BEGIN:VCALENDAR&#xD;&#xA;BEGIN:VEVENT&#xD;&#xA;UID:test&#xD;&#xA;SUMMARY:测试&#xD;&#xA;DTSTART:20261103T032000Z&#xD;&#xA;RRULE:FREQ=DAILY;COUNT=2&#xD;&#xA;END:VEVENT&#xD;&#xA;END:VCALENDAR"} else {""};
+                    let status=if data.is_empty(){404}else{200};
+                    let object=format!("<d:multistatus><d:response><d:href>/calendar/item/</d:href><d:propstat><d:prop><c:calendar-data>{data}</c:calendar-data></d:prop><d:status>HTTP/1.1 {status} Result</d:status></d:propstat></d:response></d:multistatus>");
+                    let collection="<d:response><d:href>/calendar/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/><c:calendar/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>";
+                    let xml=if index==0 {format!("<d:multistatus>{collection}</d:multistatus>")} else if index==1 {format!("<d:multistatus>{collection}<d:response><d:href>/calendar/item/</d:href></d:response></d:multistatus>")} else {object};
+                    write!(socket,"HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",xml.len(),xml).unwrap();
+                }
+            });
+            let cfg=Config{provider:Provider::DingTalk,username:"demo".into(),href:Some(format!("{base}calendar/")),server:Some(base)};
             let result=fetch_month(&cfg,"test",NaiveDate::from_ymd_opt(2026,11,3).unwrap());
             if succeeds {assert_eq!(result.unwrap().events.len(),2);} else {assert!(result.is_err());}
             server.join().unwrap();
@@ -1156,21 +1274,37 @@ mod tests {
             ev.send(Event::Synced{config:cfg.clone(),events:vec![],at:String::new()}).unwrap();
         }));
         let config=Config{provider:Provider::Feishu,username:"demo".into(),href:None,server:None};
-        cmd.send(Cmd::Configure(Some(config.clone()),false)).unwrap();
+        cmd.send(Cmd::Configure(vec![config.clone()],false)).unwrap();
         events.recv_timeout(Duration::from_secs(1)).expect("新连接应同步一次");
         assert!(matches!(events.recv_timeout(Duration::from_millis(120)),Err(RecvTimeoutError::Timeout)));
         cmd.send(Cmd::SyncNow).unwrap();
         events.recv_timeout(Duration::from_secs(1)).expect("关闭自动同步后仍能手动同步");
         assert!(matches!(events.recv_timeout(Duration::from_millis(120)),Err(RecvTimeoutError::Timeout)));
-        cmd.send(Cmd::Configure(Some(config.clone()),true)).unwrap();
+        cmd.send(Cmd::Configure(vec![config.clone()],true)).unwrap();
         events.recv_timeout(Duration::from_secs(1)).expect("开启后应立即更新");
         events.recv_timeout(Duration::from_secs(1)).expect("开启后应继续定期更新");
-        cmd.send(Cmd::Configure(Some(config),false)).unwrap();
+        cmd.send(Cmd::Configure(vec![config],false)).unwrap();
         // 等工作线程处理关闭指令，并排空恰好已经完成的一次同步。
         let _=events.recv_timeout(Duration::from_millis(120));
         assert!(matches!(events.recv_timeout(Duration::from_millis(120)),Err(RecvTimeoutError::Timeout)));
         cmd.send(Cmd::SyncNow).unwrap();
         events.recv_timeout(Duration::from_secs(1)).expect("切换开关后手动同步仍可用");
+        drop(cmd);worker.join().unwrap();
+    }
+
+    #[test]
+    fn multiple_calendars_sync_even_when_one_fails() {
+        let (cmd,rx)=channel();let (tx,events)=channel();
+        let worker=std::thread::spawn(move||run_with(rx,tx,Duration::from_secs(60),|cfg,_,ev|{
+            let event=if cfg.provider==Provider::Feishu {Event::Failed{config:cfg.clone(),message:"暂时不可用".into()}}
+                else {Event::Synced{config:cfg.clone(),events:vec![],at:String::new()}};
+            ev.send(event).unwrap();
+        }));
+        let feishu=Config{provider:Provider::Feishu,username:"demo".into(),href:None,server:None};
+        let ding=Config{provider:Provider::DingTalk,..feishu.clone()};
+        cmd.send(Cmd::Configure(vec![feishu,ding.clone()],false)).unwrap();
+        assert!(matches!(events.recv_timeout(Duration::from_secs(1)).unwrap(),Event::Failed{..}));
+        assert!(matches!(events.recv_timeout(Duration::from_secs(1)).unwrap(),Event::Synced{config,..} if config==ding));
         drop(cmd);worker.join().unwrap();
     }
 
@@ -1230,7 +1364,7 @@ mod tests {
 
     #[test]
     fn report_requests_expanded_recurring_events() {
-        let body = report_body("20261030T000000Z", "20261031T000000Z");
+        let body = report_body(Provider::Feishu,"20261030T000000Z", "20261031T000000Z");
         assert!(body.contains("<c:expand start=\"20261030T000000Z\" end=\"20261031T000000Z\"/>"));
     }
 

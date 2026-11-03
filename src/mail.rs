@@ -1266,12 +1266,12 @@ END:VCALENDAR\r\n";
     fn ics_meeting_title_and_start() {
         let m = meeting_of(ICS).expect("应当识别出会议");
         assert_eq!(m.title, "产品评审会");
-        assert_eq!(m.at, "10-30 14:30");
-        let expect = chrono::Local
-            .with_ymd_and_hms(2026, 10, 30, 14, 30, 0)
+        let start = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 30, 6, 30, 0)
             .earliest()
-            .unwrap()
-            .timestamp();
+            .unwrap();
+        assert_eq!(m.at, start.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string());
+        let expect = start.timestamp();
         assert_eq!(m.start, expect);
         assert_eq!(m.end,Some(expect+3600));
     }

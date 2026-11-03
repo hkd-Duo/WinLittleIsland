@@ -185,7 +185,8 @@ pub(crate) struct LyricsState {
     pub error: Option<lyrics::FetchError>,
     pub retry_at: Option<f64>,
     pub lyrics: Option<lyrics::Lyrics>,
-    pub rx: Option<std::sync::mpsc::Receiver<Result<lyrics::Lyrics, lyrics::FetchError>>>,
+    pub rx: Option<std::sync::mpsc::Receiver<Result<(lyrics::Lyrics,bool), lyrics::FetchError>>>,
+    pub native_rx: Option<std::sync::mpsc::Receiver<Option<lyrics::Lyrics>>>,
 }
 
 /// v0.5.5：邮件面板与设置表单的界面状态。正文只在内存里过一次，不落盘。
@@ -230,6 +231,10 @@ impl MailState {
 /// v0.5.6：日程（CalDAV）的界面状态。密码只在表单里暂存，保存后立刻清掉。
 #[derive(Default)]
 pub(crate) struct CalendarState {
+    pub local: Vec<crate::local_calendar::Entry>,
+    pub local_error: String,
+    pub draft: Option<crate::local_calendar::Draft>,
+    pub feeds: Vec<CalendarFeed>,
     pub config: Option<calendar::Config>,
     /// 未来 24 小时的日程（提醒也读这里）。
     pub events: Vec<mail::Meeting>,
@@ -249,6 +254,23 @@ pub(crate) struct CalendarState {
     pub test_password: String,
 }
 
+pub(crate) struct CalendarFeed {
+    pub config: calendar::Config,
+    pub events: Vec<mail::Meeting>,
+    pub month: crate::calendar_ui::State,
+    pub connected: bool,
+    pub last_sync: String,
+    pub failures: u32,
+    pub error: String,
+}
+
+impl CalendarFeed {
+    fn new(config: calendar::Config) -> Self {
+        Self { config, events: vec![], month: Default::default(), connected: false,
+            last_sync: String::new(), failures: 0, error: String::new() }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct CalendarForm {
     pub provider: calendar::Provider,
@@ -261,7 +283,11 @@ pub(crate) struct CalendarForm {
 impl CalendarState {
     pub fn load() -> Self {
         let config = calendar::load_config();
-        Self { config, ..Default::default() }
+        let form = CalendarForm { provider: calendar::selected_provider(),
+            username: config.as_ref().map(|cfg| cfg.username.clone()).unwrap_or_default(), ..Default::default() };
+        let feeds = calendar::load_configs().into_iter().map(CalendarFeed::new).collect();
+        let (local,local_error)=match crate::local_calendar::load(){Ok(events)=>(events,String::new()),Err(error)=>(vec![],error)};
+        Self { config, form, feeds, local, local_error, ..Default::default() }
     }
 
 }
@@ -571,6 +597,10 @@ impl App {
                     self.calendar.view.loading=false;
                     self.calendar.view.error.clear();
                 }
+                if !self.calendar.feeds.iter().any(|feed| feed.config == cfg) {
+                    self.calendar.feeds.retain(|feed| feed.config.provider != cfg.provider);
+                    self.calendar.feeds.push(CalendarFeed::new(cfg.clone()));
+                }
                 self.calendar.config = Some(cfg);
                 self.calendar.connected = true;
                 self.calendar.failures = 0;
@@ -582,6 +612,9 @@ impl App {
                 if self.page==CALENDAR_PAGE {self.select_calendar_day(self.calendar.view.day);}
             }
             calendar::Event::Synced { config, events, at } => {
+                if let Some(feed)=self.calendar.feeds.iter_mut().find(|feed|feed.config==config) {
+                    feed.events=events.clone();feed.connected=true;feed.failures=0;feed.error.clear();feed.last_sync=at.clone();
+                }
                 if self.calendar.config.as_ref()!=Some(&config){return;}
                 self.calendar.events = events;
                 self.calendar.connected = true;
@@ -590,6 +623,17 @@ impl App {
                 self.calendar.last_sync = at;
             }
             calendar::Event::MonthLoaded { config, month, result } => {
+                if !self.calendar.feeds.is_empty() {
+                    if month!=self.calendar.view.month {return;}
+                    let Some(feed)=self.calendar.feeds.iter_mut().find(|feed|feed.config==config) else{return;};
+                    feed.month.loading=false;
+                    match result {
+                        Ok(events)=>{feed.month.events=events;feed.month.loaded=Some(month);feed.month.error.clear();}
+                        Err(message)=>feed.month.error=message,
+                    }
+                    self.refresh_calendar_month_status();
+                    return;
+                }
                 let view=&mut self.calendar.view;
                 if month!=view.month || self.calendar.config.as_ref()!=Some(&config){return;}
                 view.loading=false;
@@ -599,6 +643,9 @@ impl App {
                 }
             }
             calendar::Event::Failed { config, message } => {
+                if let Some(feed)=self.calendar.feeds.iter_mut().find(|feed|feed.config==config) {
+                    feed.connected=false;feed.failures=feed.failures.saturating_add(1);feed.error=message.clone();
+                }
                 if self.calendar.config.as_ref()==Some(&config) {
                     self.calendar.connected = false;
                     self.calendar.failures = self.calendar.failures.saturating_add(1);
@@ -608,17 +655,51 @@ impl App {
         }
     }
 
-    /// 当前配置的快照（外壳据此决定是否重新下发给工作线程）。
-    pub fn calendar_config(&self) -> Option<calendar::Config> {
-        self.calendar.config.clone()
+    /// 所有已连接的平台都参与同步，设置标签只决定正在编辑的账号。
+    pub fn calendar_configs(&self) -> Vec<calendar::Config> {
+        if self.calendar.feeds.is_empty() {self.calendar.config.clone().into_iter().collect()}
+        else {self.calendar.feeds.iter().map(|feed|feed.config.clone()).collect()}
     }
 
-    /// 断开日历：返回被删除凭据对应的旧配置，界面状态一并清空。
+    pub(crate) fn refresh_calendar_month_status(&mut self) {
+        let month=self.calendar.view.month;
+        self.calendar.view.loading=self.calendar.feeds.iter().any(|feed|feed.month.loading);
+        self.calendar.view.loaded=(!self.calendar.feeds.is_empty() && self.calendar.feeds.iter().all(|feed|feed.month.loaded==Some(month))).then_some(month);
+        self.calendar.view.error=self.calendar.feeds.iter().filter(|feed|!feed.month.error.is_empty())
+            .map(|feed|format!("{}：{}",feed.config.provider.label(),feed.month.error)).collect::<Vec<_>>().join("；");
+    }
+
+    pub(crate) fn select_calendar_provider(&mut self, provider: calendar::Provider) {
+        if self.calendar.testing || self.calendar.form.provider == provider { return; }
+        if let Err(error) = calendar::select_provider(provider) {
+            self.calendar.note = error;
+            self.calendar.note_error = true;
+            return;
+        }
+        let feed=self.calendar.feeds.iter().find(|feed|feed.config.provider==provider);
+        self.calendar.config=feed.map(|feed|feed.config.clone());
+        self.calendar.events=feed.map(|feed|feed.events.clone()).unwrap_or_default();
+        self.calendar.connected=feed.is_some_and(|feed|feed.connected);
+        self.calendar.last_sync=feed.map(|feed|feed.last_sync.clone()).unwrap_or_default();
+        self.calendar.failures=feed.map(|feed|feed.failures).unwrap_or_default();
+        self.calendar.error=feed.map(|feed|feed.error.clone()).unwrap_or_default();
+        self.calendar.form=CalendarForm{provider,username:self.calendar.config.as_ref().map(|cfg|cfg.username.clone()).unwrap_or_default(),..Default::default()};
+        self.calendar.note.clear();self.calendar.note_error=false;
+    }
+
+    /// 只移除正在管理的平台，保留其他平台的日程与提醒。
     pub fn forget_calendar(&mut self) -> Option<calendar::Config> {
         let old = self.calendar.config.take();
+        if let Some(config)=&old {
+            self.calendar.feeds.retain(|feed|feed.config!=*config);
+            let is_old=|alert:&crate::extras::Alert|alert.meeting.as_ref().is_some_and(|(_,source)|source==config.provider.label());
+            self.alerts.retain(|alert|!is_old(alert));
+            if self.notice.as_ref().is_some_and(is_old){self.notice=None;}
+        }
         self.calendar.connected = false;
         self.calendar.events.clear();
-        self.calendar.view=Default::default();
+        self.calendar.view.events.clear();
+        self.refresh_calendar_month_status();
         self.calendar.last_sync.clear();
         self.calendar.failures = 0;
         self.calendar.error.clear();
@@ -735,7 +816,7 @@ impl App {
         self.calendar.form.provider = Provider::Feishu;
         self.calendar.form.username = "demo***@feishu.example".into();
         self.settings_tab = 8;
-        self.settings_open = true;
+        self.open_settings();
         self.settings.calendar_prompt = false;
         let later = |secs: i64| chrono::Local::now().timestamp() + secs;
         let label = |ts: i64| {
@@ -865,7 +946,7 @@ impl App {
     }
 
     pub fn is_editing(&self) -> bool {
-        self.adding || self.editing.is_some() || self.task_dialog.is_some()
+        self.adding || self.editing.is_some() || self.task_dialog.is_some() || self.calendar.draft.is_some()
     }
 
     pub fn foreground_changed(&mut self) {
@@ -903,6 +984,7 @@ impl App {
         self.adding = false;
         self.editing = None;
         self.task_dialog=None;
+        self.calendar.draft=None;
         self.buf.clear();
         self.todo_input_focused=false;
     }
@@ -910,6 +992,8 @@ impl App {
     fn island_lyrics_active(&self)->bool {
         self.settings.island_lyrics && self.settings.visible_pages[0] && self.media.is_music()
             && !self.browser_minimal_active
+            && self.ly.key==format!("{}|{}|{:.0}",self.media.title,self.media.artist,self.media.duration)
+            && self.ly.lyrics.as_ref().is_some_and(|lyrics|lyrics.synced && lyrics.lines.iter().any(|line|!line.text.trim().is_empty()))
     }
     pub(crate) fn compact_notices(&self)->bool {self.island_lyrics_active()&&!self.open&&!self.notice.as_ref().is_some_and(|a|a.meeting.is_some())}
 
@@ -934,8 +1018,7 @@ impl App {
                 if !lyrics.synced {"暂无同步歌词"}
                 else if lyrics.index_at(self.lyric_position()).is_none() {"前奏"}
                 else {"间奏"}
-            } else if let Some(error)=&self.ly.error {error.label()}
-            else {"暂无歌词"};
+            } else {""};
         let ink=if current.is_some(){theme::WHITE}else{theme::GRAY};
         let layout=|text:String| {
             let mut job=egui::text::LayoutJob::simple(text,theme::font(11.0,W::Semibold),ink,LYRIC_BAR_W-80.0);
@@ -1129,7 +1212,7 @@ impl App {
                         let calendar_len=if self.page==CALENDAR_PAGE {self.calendar_entries(self.calendar.view.day).len()}else{0};
                         let calendar_body=self.page==CALENDAR_PAGE && Rect::from_min_max(Pos2::new(163.0,52.0),Pos2::new(378.0,208.0)).contains(cursor);
                         let list=match self.page {
-                            CALENDAR_PAGE if calendar_body=>Some((&mut self.calendar.view.first,calendar_len.saturating_sub(5))),
+                            CALENDAR_PAGE if calendar_body=>Some((&mut self.calendar.view.first,calendar_len.saturating_sub(4))),
                             4 if Rect::from_min_max(Pos2::new(196.0,31.0),Pos2::new(377.0,124.0)).contains(cursor)
                                 =>Some((&mut self.todo_first,self.todos.items.len().saturating_sub(3))),
                             3 if Rect::from_min_max(Pos2::new(36.0,28.0),Pos2::new(383.0,128.0)).contains(cursor)
@@ -1232,7 +1315,7 @@ impl App {
         if reveal > 0.004 && !banner && !restoring_lyrics {
             let c = base.shifted(0.0, (1.0 - reveal) * -5.0).faded(reveal);
             let c = if reveal < 0.6 { c.ghost() } else { c };
-            if self.task_dialog.is_some(){self.draw_task_editor(&c);}else{self.panel_body(&c, env, &mut cmds);}
+            if self.calendar.draft.is_some(){self.draw_calendar_editor(&c);}else if self.task_dialog.is_some(){self.draw_task_editor(&c);}else{self.panel_body(&c, env, &mut cmds);}
             if !self.toast_below {self.toast_layer(&c,106.0);}
         }
         // 岛下的确认提示使用独立裁剪区域，收起时跟随岛体下沿。
@@ -1244,6 +1327,7 @@ impl App {
         }
 
         if self.task_dialog.is_some() && reveal>0.9 {self.task_editor_inputs(ui,origin,&mut cmds);}
+        if self.calendar.draft.is_some() && reveal>0.9 {self.calendar_editor_inputs(ui,origin,&mut cmds);}
 
         // ---------- 输出 ----------
         let rel = |r: Rect| r.translate(-win.min.to_vec2());
@@ -1408,7 +1492,7 @@ impl App {
             let shown=c.ui.ctx().animate_value_with_time(egui::Id::new(("island-lyric-line",&self.ly.key)),index as f32,0.18);
             let fade=1.0-(index as f32-shown).abs().min(1.0);
             let position=c.pos(left+content_width-LYRIC_BAR_W/2.0,center_y-galley.size().y/2.0+(1.0-fade)*3.0);
-            c.faded(fade).painter.galley(position,galley,if lyric.is_some(){theme::WHITE}else{theme::GRAY});
+            c.painter.galley(position,galley,if lyric.is_some(){theme::WHITE}else{theme::GRAY});
             paint::playback_bars(&c,left+content_width-21.0,center_y,self.t,self.media.playing,theme::WHITE);
             if self.pomo.running {
                 let alpha=smoothstep(0.88,1.0,(width-content_width)/self.lyric_focus_space());
@@ -1675,11 +1759,19 @@ impl App {
         let now_ts = chrono::Local::now().timestamp();
         let mut picks = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for m in &self.calendar.events {
+        for entry in &self.calendar.local {
+            let Some(at)=entry.reminder_at() else{continue;};
+            let key=calendar::dedupe_key(&entry.event);
+            let cutoff=if entry.event.all_day{at+60}else{entry.event.start+60};
+            if now_ts>=at && now_ts<cutoff && !self.mail.fired.contains(&key) && seen.insert(key.clone()) {
+                picks.push((key,entry.event.clone(),"本机日程".into(),CALENDAR_PAGE));
+            }
+        }
+        for (m,provider) in self.calendar_work_events(None) {
             let left = m.start - now_ts;
             let key = calendar::dedupe_key(m);
             if !m.all_day && left <= lead && left > -60 && !self.mail.fired.contains(&key) && seen.insert(key.clone()) {
-                let source=self.calendar.config.as_ref().map(|cfg|cfg.provider.label()).unwrap_or("日历");
+                let source=provider.map(|provider|provider.label()).unwrap_or("日历");
                 picks.push((key, m.clone(), source.to_string(), CALENDAR_PAGE));
             }
         }
@@ -1733,7 +1825,7 @@ impl App {
                 else {pos + (env.t - at).min(3.0)};
             if m.duration>0.0 {np.position=np.position.min(m.duration);}
         }
-        if self.media.source != np.source { self.ly=LyricsState::default(); }
+        if self.media.source != np.source || self.media.song_id != np.song_id { self.ly=LyricsState::default(); }
         self.media = np;
         if let Some(image)=&self.media.artwork {
             if !self.music_artwork.as_ref().is_some_and(|(old,_)|std::sync::Arc::ptr_eq(old,image)) {
@@ -1744,29 +1836,57 @@ impl App {
 
     fn poll_lyrics(&mut self) {
         if !self.media.is_music(){self.ly=LyricsState::default();return;}
-        if !self.show_lyrics && !self.settings.island_lyrics {return;}
+        if !self.show_lyrics && !self.settings.island_lyrics {self.ly=LyricsState::default();return;}
         let np = &self.media;
         if np.title.is_empty(){self.ly=LyricsState::default();return;}
         let key = format!("{}|{}|{:.0}", np.title, np.artist, np.duration);
         if key != self.ly.key || self.ly.retry_at.is_some_and(|at|self.t>=at) {
-            self.ly = LyricsState { key, loading: true, ..Default::default() };
+            let native_only=key==self.ly.key && np.source.to_ascii_lowercase().contains("kugou")
+                && self.ly.error==Some(lyrics::FetchError::NotFound);
+            let cached=if key==self.ly.key && np.source.to_ascii_lowercase().contains("kugou"){self.ly.lyrics.take()}else{None};
+            self.ly = LyricsState { key, loading: cached.is_none() && !native_only, lyrics:cached.clone(),
+                error:native_only.then_some(lyrics::FetchError::NotFound), ..Default::default() };
             let (tx, rx) = std::sync::mpsc::channel();
             self.ly.rx = Some(rx);
             let (source, title, artist, dur) = (np.source.clone(), np.title.clone(), np.artist.clone(), np.duration);
+            let song_id=np.song_id;
+            if source.to_ascii_lowercase().contains("kugou") || lyrics::is_soda(&source) {
+                let (tx,rx)=std::sync::mpsc::channel();self.ly.native_rx=Some(rx);
+                let (source,title,artist)=(source.clone(),title.clone(),artist.clone());
+                std::thread::spawn(move ||loop {
+                    let found=lyrics::read_native(&source,&title,&artist,dur);
+                    let done=found.is_some();
+                    if tx.send(found).is_err() || done {break;}
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                });
+            }
             std::thread::spawn(move || {
-                let _ = tx.send(lyrics::fetch_for_source(&source, &title, &artist, dur));
+                let result=if native_only {
+                    lyrics::kugou_cache::read(&title,&artist,dur).map(|lyrics|(lyrics,false)).ok_or(lyrics::FetchError::NotFound)
+                }else{lyrics::fetch_for_display(&source, &title, &artist, dur, song_id, cached)};
+                let _ = tx.send(result);
             });
+        }
+        if let Some(rx)=&self.ly.native_rx {
+            let mut found=None;
+            while let Ok(result)=rx.try_recv(){if result.is_some(){found=result;}}
+            if let Some(lyrics)=found {
+                self.ly.lyrics=Some(lyrics);self.ly.loading=false;self.ly.error=None;
+                self.ly.retry_at=None;self.ly.rx=None;self.ly.native_rx=None;
+            }
         }
         if let Some(rx) = &self.ly.rx {
             if let Ok(r) = rx.try_recv() {
                 self.ly.loading = false;
                 match r {
-                    Ok(l) => {
-                        if lyrics::is_soda(&self.media.source) && !l.synced {self.ly.retry_at=Some(self.t+5.0);}
+                    Ok((l,waiting_native)) => {
+                        self.ly.error=None;
+                        self.ly.retry_at=None;
+                        if waiting_native || lyrics::is_soda(&self.media.source) && !l.synced {self.ly.retry_at=Some(self.t+5.0);}
                         self.ly.lyrics = Some(l);
                     },
                     Err(error) => {
-                        if lyrics::is_soda(&self.media.source) {self.ly.retry_at=Some(self.t+5.0);}
+                        if lyrics::is_soda(&self.media.source) || self.media.source.to_ascii_lowercase().contains("kugou") && error==lyrics::FetchError::NotFound {self.ly.retry_at=Some(self.t+5.0);}
                         else if matches!(error,lyrics::FetchError::Unavailable(_)|lyrics::FetchError::InvalidResponse(_)){self.ly.retry_at=Some(self.t+30.0);}
                         self.ly.error = Some(error);
                     },

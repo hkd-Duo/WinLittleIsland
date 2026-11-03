@@ -121,6 +121,8 @@ impl State {
                 }
                 egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
                     let window = ui.max_rect().shrink(8.0);
+                    #[cfg(windows)]
+                    clip_update_window(window, ctx.pixels_per_point());
                     ui.painter().rect_filled(window, 22.0, egui::Color32::from_rgb(25,25,28));
                     ui.painter().rect_stroke(window, 22.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(55,55,61)), egui::StrokeKind::Inside);
                     let close_rect = egui::Rect::from_min_size(window.right_top()+egui::vec2(-42.0,12.0),egui::vec2(28.0,28.0));
@@ -217,6 +219,38 @@ impl State {
             });
     }
 
+}
+
+// Windows 的 GL 透明窗口可能仍显示黑底，按绘制轮廓裁掉窗口外沿。
+#[cfg(windows)]
+fn clip_update_window(rect: egui::Rect, scale: f32) {
+    use windows::Win32::{Foundation::{BOOL, HWND, LPARAM}, Graphics::Gdi::*,
+        System::Threading::GetCurrentThreadId, UI::WindowsAndMessaging::*};
+    unsafe extern "system" fn visit(hwnd: HWND, data: LPARAM) -> BOOL {
+        let mut title = [0u16; 64];
+        let len = GetWindowTextW(hwnd, &mut title) as usize;
+        if String::from_utf16_lossy(&title[..len]) != "岛仔更新" { return BOOL(1); }
+        let &(rect, scale) = &*(data.0 as *const (egui::Rect, f32));
+        let region = update_window_region(rect, scale);
+        let old = CreateRectRgn(0, 0, 0, 0);
+        GetWindowRgn(hwnd, old);
+        if EqualRgn(old, region).as_bool() || SetWindowRgn(hwnd, region, true) == 0 {
+            let _ = DeleteObject(region);
+        }
+        let _ = DeleteObject(old);
+        BOOL(0)
+    }
+    let data = (rect, scale);
+    unsafe { let _ = EnumThreadWindows(GetCurrentThreadId(), Some(visit), LPARAM(&data as *const _ as isize)); }
+}
+
+#[cfg(windows)]
+unsafe fn update_window_region(rect: egui::Rect, scale: f32) -> windows::Win32::Graphics::Gdi::HRGN {
+    windows::Win32::Graphics::Gdi::CreateRoundRectRgn(
+        (rect.left()*scale).round() as i32, (rect.top()*scale).round() as i32,
+        (rect.right()*scale).round() as i32 + 1, (rect.bottom()*scale).round() as i32 + 1,
+        (44.0*scale).round() as i32, (44.0*scale).round() as i32,
+    )
 }
 
 fn check() -> Result<Option<Release>, String> {
@@ -492,5 +526,24 @@ mod tests {
         }
         if let Some(old) = old { std::env::set_var("DAOZAI_DATA_DIR", old); }
         else { std::env::remove_var("DAOZAI_DATA_DIR"); }
+    }
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn update_window_region_excludes_black_corners() {
+    use windows::Win32::Graphics::Gdi::*;
+    for scale in [1.0, 1.25, 1.5, 2.0] {
+        let rect = egui::Rect::from_min_max(egui::pos2(8.0,8.0), egui::pos2(512.0,408.0));
+        unsafe {
+            let region = update_window_region(rect, scale);
+            for (x,y) in [(9.0,9.0),(511.0,9.0),(9.0,407.0),(511.0,407.0),(1.0,208.0)] {
+                assert!(!PtInRegion(region,(x*scale) as i32,(y*scale) as i32).as_bool());
+            }
+            for (x,y) in [(260.0,208.0),(260.0,9.0),(9.0,208.0)] {
+                assert!(PtInRegion(region,(x*scale) as i32,(y*scale) as i32).as_bool());
+            }
+            let _ = DeleteObject(region);
+        }
     }
 }

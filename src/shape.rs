@@ -38,6 +38,24 @@ pub fn outline(rect: Rect, flare: f32, flare_h: f32, radius: f32) -> Vec<Pos2> {
         .collect()
 }
 
+// 顶边不参与羽化；端点只取肩部切线，避免整条顶边扭曲法线。
+fn edge_normal(pts: &[Pos2], i: usize) -> Vec2 {
+    let normal = |a: Pos2, b: Pos2| {
+        let d = (b - a).normalized();
+        Vec2::new(d.y, -d.x)
+    };
+    if i == 0 {
+        return normal(pts[0], pts[1]);
+    }
+    if i == pts.len() - 1 {
+        return normal(pts[i - 1], pts[i]);
+    }
+    let prev = normal(pts[i - 1], pts[i]);
+    let next = normal(pts[i], pts[i + 1]);
+    // 相邻单位法线的交点补偿，保持两段的垂直羽化宽度一致。
+    (prev + next) / (1.0 + prev.dot(next))
+}
+
 /// 抗锯齿填充。`feather` 是羽化宽度（逻辑点，通常 = 1 / ppp）。
 pub fn fill(painter: &egui::Painter, rect: Rect, flare: f32, flare_h: f32, radius: f32, color: Color32, feather: f32) {
     let rows = sections(rect, flare, flare_h, radius);
@@ -62,20 +80,13 @@ pub fn fill(painter: &egui::Painter, rect: Rect, flare: f32, flare_h: f32, radiu
         .collect();
     let n = pts.len();
     let clear = Color32::TRANSPARENT;
-    let normal = |i: usize| -> Vec2 {
-        let prev = pts[(i + n - 1) % n];
-        let next = pts[(i + 1) % n];
-        let d = (next - prev).normalized();
-        // 顺时针轮廓的外法线 = 方向向量顺时针旋转 90°（屏幕坐标 y 向下）
-        Vec2::new(d.y, -d.x)
-    };
     for i in 0..n - 1 {
         let (a, b) = (pts[i], pts[i + 1]);
         // 顶边两端（右上角 → 左上角那条闭合边）不羽化
         if a.y <= rect.top() + 0.01 && b.y <= rect.top() + 0.01 {
             continue;
         }
-        let (na, nb) = (normal(i), normal(i + 1));
+        let (na, nb) = (edge_normal(&pts, i), edge_normal(&pts, i + 1));
         let base = mesh.vertices.len() as u32;
         mesh.colored_vertex(a, color);
         mesh.colored_vertex(b, color);
@@ -118,6 +129,27 @@ mod tests {
             prev = next;
         }
         inside
+    }
+
+    #[test]
+    fn shoulder_feather_keeps_one_pixel_perpendicular_to_edge() {
+        for (width, height, flare, flare_h, radius) in [
+            (143.0, 25.0, 5.0, 8.0, 12.5),
+            (419.0, 140.0, 17.6, 16.0, 33.0),
+        ] {
+            let pts = outline(Rect::from_min_size(Pos2::ZERO, Vec2::new(width, height)), flare, flare_h, radius);
+            for ppp in [1.0, 1.25, 1.5, 2.0] {
+                for i in 0..pts.len() - 1 {
+                    let d = (pts[i + 1] - pts[i]).normalized();
+                    let normal = Vec2::new(d.y, -d.x);
+                    for j in [i, i + 1] {
+                        let offset = edge_normal(&pts, j) / ppp;
+                        assert!((offset.dot(normal) * ppp - 1.0).abs() < 0.001,
+                            "羽化必须沿每段轮廓保持一物理像素：边 {i}，顶点 {j}，缩放 {ppp}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

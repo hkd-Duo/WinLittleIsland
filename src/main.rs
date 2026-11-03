@@ -4,6 +4,7 @@
 use eframe::egui::{self, Color32, Pos2};
 use daozai::app::{self, App, Cmd, Env, Options};
 use daozai::smtc;
+use daozai::poll_clock::PollClock;
 use std::time::{Duration, Instant};
 
 mod diagnostics;
@@ -16,7 +17,7 @@ struct Shell {
     media: smtc::Shared,
     placed: bool,
     win_x: f32,
-    sys: (Option<u8>, bool, Instant),
+    sys: (Option<u8>, bool, PollClock),
     #[cfg(windows)]
     system_state: daozai::system::Snapshot,
     #[cfg(windows)]
@@ -40,16 +41,16 @@ struct Shell {
     bt_rx: Option<std::sync::mpsc::Receiver<Vec<daozai::bt::Device>>>,
     bt: Vec<daozai::bt::Device>,
     bt_ready: bool,
-    volume_quiet: Instant,
+    volume_quiet: PollClock,
     /// v0.5.5：邮件收信服务（工作线程），以及上次同步给它的账号/开关快照。
     mail: daozai::mail::Service,
     mail_sig: (bool, u32, Vec<daozai::mail::Account>),
     /// v0.5.6：日程（CalDAV）服务与上次下发的配置。
     cal: daozai::calendar::Service,
-    cal_sig: (Option<daozai::calendar::Config>, bool),
+    cal_sig: (Vec<daozai::calendar::Config>, bool),
     quota: daozai::quota::Service,
     quota_sig: Option<(bool,Vec<daozai::quota::Account>)>,
-    quota_at: Instant,
+    quota_at: PollClock,
 }
 
 impl Shell {
@@ -89,7 +90,7 @@ impl Shell {
             media,
             placed: false,
             win_x: 0.0,
-            sys: (None, false, Instant::now() - Duration::from_secs(60)),
+            sys: (None, false, PollClock::default()),
             #[cfg(windows)]
             system_state,
             #[cfg(windows)] system_rx,
@@ -108,12 +109,12 @@ impl Shell {
             bt_rx: Some(daozai::bt::spawn()),
             bt: Vec::new(),
             bt_ready: false,
-            volume_quiet: Instant::now() - Duration::from_secs(5),
+            volume_quiet: PollClock::default(),
             mail: daozai::mail::Service::start(),
             mail_sig: (false, 0, Vec::new()),
             cal: daozai::calendar::Service::start(),
-            cal_sig: (None, true),
-            quota: daozai::quota::Service::start(), quota_sig: None, quota_at: Instant::now()-Duration::from_secs(180),
+            cal_sig: (Vec::new(), true),
+            quota: daozai::quota::Service::start(), quota_sig: None, quota_at: PollClock::default(),
         }
     }
 
@@ -153,11 +154,11 @@ impl Shell {
     fn env(&mut self, ctx: &egui::Context) -> Env {
         let (clock, today, date) = local_now();
         // 电量变化很慢，每 5 秒读一次就够
-        if self.sys.2.elapsed() > Duration::from_secs(5) {
+        if self.sys.2.ready(Duration::from_secs(5)) {
             let (b, c) = read_power();
             if self.app.settings.show_battery && self.sys.0.is_some() && self.sys.1!=c && self.app.settings.system_hud {self.app.alert(if c {"电源已连接"}else{"已切换电池供电"},b.map(|v|format!("当前电量 {v}%")).unwrap_or_else(||"桌面电源状态已更新".into()),5,false);}
             if self.app.settings.show_battery && b.is_some_and(|v|v<=20) && !c && self.sys.0.is_some_and(|v|v>20) {self.app.alert("电量偏低",format!("剩余 {}% · 请连接电源",b.unwrap()),5,true);}
-            self.sys = (b, c, Instant::now());
+            self.sys = (b, c, PollClock::now());
         }
         let ppp = ctx.pixels_per_point();
         let origin = ctx.input(|i| i.viewport().outer_rect).map(|r| r.min).unwrap_or(Pos2::new(self.win_x, 0.0));
@@ -226,11 +227,11 @@ impl eframe::App for Shell {
                 }
                 let new=observation.system;
                 // 切换输出设备时，系统会恢复该设备的音量；等待它稳定后再提示调节。
-                if new.audio_endpoint!=self.system_state.audio_endpoint {self.volume_quiet=Instant::now();}
+                if new.audio_endpoint!=self.system_state.audio_endpoint {self.volume_quiet=PollClock::now();}
                 if self.app.settings.system_hud {
                     for (title,body) in new.changes(&self.system_state) {
                         // 拖动音量条刚改过音量时，系统回声不再单独弹一条。
-                        if title=="系统音量" && self.volume_quiet.elapsed()<Duration::from_millis(900) { continue; }
+                        if title=="系统音量" && !self.volume_quiet.ready(Duration::from_millis(900)) { continue; }
                         self.app.alert(title,body,5,false);
                     }
                 }
@@ -260,9 +261,9 @@ impl eframe::App for Shell {
         let cal_demo=std::env::var("DAOZAI_CAL_DEMO").is_ok();
         #[cfg(not(feature="record"))]
         let cal_demo=false;
-        let cal=if cal_demo{None}else{self.app.calendar_config()};
+        let cal=if cal_demo{Vec::new()}else{self.app.calendar_configs()};
         let auto_sync=self.app.settings.calendar_auto_sync;
-        if (cal.as_ref(),auto_sync)!=(self.cal_sig.0.as_ref(),self.cal_sig.1){
+        if (&cal,auto_sync)!=(&self.cal_sig.0,self.cal_sig.1){
             self.cal.configure(cal.clone(),auto_sync);
             self.cal_sig=(cal,auto_sync);
         }
@@ -271,9 +272,9 @@ impl eframe::App for Shell {
         #[cfg(not(feature="record"))] let quota_demo=false;
         if !quota_demo {
             let config=self.app.quota_config();let sig=(config.enabled,config.accounts.iter().cloned().map(|mut a|{a.alias.clear();a.pinned=false;a}).collect::<Vec<_>>());
-            if self.quota_sig.as_ref()!=Some(&sig) || self.quota_at.elapsed()>Duration::from_secs(180){
+            if self.quota_sig.as_ref()!=Some(&sig) || self.quota_at.ready(Duration::from_secs(180)){
                 let accounts:Vec<_>=sig.1.iter().filter(|a|sig.0 && a.enabled).cloned().collect();
-                if self.quota.refresh(accounts.clone()){self.app.quota_pending(&accounts);self.quota_sig=Some(sig);self.quota_at=Instant::now();}
+                if self.quota.refresh(accounts.clone()){self.app.quota_pending(&accounts);self.quota_sig=Some(sig);self.quota_at=PollClock::now();}
             }
             while let Some(ev)=self.quota.try_recv(){self.app.quota_event(ev);}
         }
@@ -297,7 +298,8 @@ impl eframe::App for Shell {
         for cmd in out.cmds {
             match cmd {
                 Cmd::Media(t) => {
-                    std::thread::spawn(move || smtc::control(t));
+                    let source=self.media.lock().map(|media|media.source.clone()).unwrap_or_default();
+                    std::thread::spawn(move || smtc::control(t,&source));
                 }
                 Cmd::Open(p) => {if let Err(e)=open_path(&p){self.app.say(e);}},
                 Cmd::OpenUrl(url)=>{
@@ -318,9 +320,9 @@ impl eframe::App for Shell {
                     #[cfg(windows)] match daozai::system::pick_files_for("选择 AI 账号的登录 JSON 文件",false){Ok(files)=>if let Some(path)=files.into_iter().next(){self.app.quota_set_source(path);},Err(_)=>self.app.say("无法选择登录文件")}
                 },
                 Cmd::QuotaRefresh=>{
-                    if self.quota_at.elapsed()>Duration::from_secs(15) {
+                    if self.quota_at.ready(Duration::from_secs(15)) {
                         let config=self.app.quota_config();let accounts:Vec<_>=config.accounts.iter().filter(|a|config.enabled && a.enabled).cloned().collect();
-                        if self.quota.refresh(accounts.clone()){self.app.quota_pending(&accounts);self.quota_at=Instant::now();}
+                        if self.quota.refresh(accounts.clone()){self.app.quota_pending(&accounts);self.quota_at=PollClock::now();}
                     }else{self.app.say("请稍后再刷新");}
                 },
                 Cmd::QuotaConnected=>{self.quota_sig=None;},
@@ -329,11 +331,11 @@ impl eframe::App for Shell {
                 },
                 Cmd::SetVolume(v)=>{
                     #[cfg(windows)] daozai::system::set_volume(v);
-                    self.volume_quiet=Instant::now();
+                    self.volume_quiet=PollClock::now();
                 },
                 Cmd::ToggleMute=>{
                     #[cfg(windows)] daozai::system::toggle_mute();
-                    self.volume_quiet=Instant::now();
+                    self.volume_quiet=PollClock::now();
                 },
                 Cmd::Copy(text)=>{ctx.copy_text(text);self.app.say("已复制");},
                 Cmd::Notify(title,body)=>{
@@ -353,10 +355,11 @@ impl eframe::App for Shell {
                 Cmd::CalendarSync=>self.cal.sync_now(),
                 Cmd::CalendarMonth(month)=>self.cal.view_month(month),
                 Cmd::CalendarForget=>{
+                    if let Err(error)=daozai::calendar::forget_config(){self.app.say(&error);continue;}
                     if let Some(old)=self.app.forget_calendar(){daozai::calendar::secrets::delete(&old);}
-                    daozai::calendar::forget_config();
-                    self.cal.configure(None,self.app.settings.calendar_auto_sync);
-                    self.cal_sig=(None,self.app.settings.calendar_auto_sync);
+                    let configs=self.app.calendar_configs();
+                    self.cal.configure(configs.clone(),self.app.settings.calendar_auto_sync);
+                    self.cal_sig=(configs,self.app.settings.calendar_auto_sync);
                 },
                 Cmd::Focus => ctx.send_viewport_cmd(egui::ViewportCommand::Focus),
             }

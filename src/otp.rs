@@ -205,7 +205,9 @@ fn score_at(hay: &str, start: usize, end: usize, text: &str, subject_end: usize,
 
     // ---- 硬丢弃：URL / 邮箱 / 日期时间 / 电话 / 订单金额卡号 ----
     let token = {
-        let left = hay[..start].rfind(char::is_whitespace).map(|i| i + 1).unwrap_or(0);
+        let left = hay[..start].char_indices().rev()
+            .find(|(_, c)| c.is_whitespace())
+            .map(|(i, c)| i + c.len_utf8()).unwrap_or(0);
         let right = hay[end..].find(char::is_whitespace).map(|i| end + i).unwrap_or(hay.len());
         &hay[left..right]
     };
@@ -355,6 +357,16 @@ mod tests {
         assert_eq!(code("", "验证码 906213"), Some("906213".into()));
         assert_eq!(code("", "安全码：4021"), Some("4021".into()));
         assert_eq!(code("", "验证码\n735164\n请勿泄露"), Some("735164".into()));
+    }
+
+    #[test]
+    fn unicode_whitespace_before_code_is_safe() {
+        for space in ['\u{00a0}', '\u{2002}', '\u{2003}', '\u{202f}', '\u{3000}'] {
+            let text = format!("验证码：{space}834921");
+            assert_eq!(code("", &text), Some("834921".into()));
+            assert_eq!(code(&text, ""), Some("834921".into()));
+            assert_eq!(code("", &format!("验证码：{space}https://example.com/834921")), None);
+        }
     }
 
     #[test]
