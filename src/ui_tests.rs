@@ -3782,12 +3782,14 @@ fn hover_tooltips_fit_native_region_and_release_it_after_leaving(){
             label="邮件验证码\n收到邮件，验证码 123456，请在十分钟内使用".to_string();
             pointer=Pos2::new(WIN_W/2.0+(h.app.current_width()-44.0)/2.0+26.0,15.0);
         }
-        h.hover(pointer,1.5);
+        h.hover(pointer,0.4);
+        let hit_before_tooltip=h.hit;
+        h.hover(pointer,1.1);
         let bounds=h.shapes.iter().find_map(|s|match &s.shape {
             egui::Shape::Text(t) if t.galley.text()==label=>Some(t.visual_bounding_rect()),_=>None,
         }).expect("悬停后应显示完整提示");
         assert!(h.region.contains_rect(bounds),"悬停提示不能被原生窗口裁掉：{bounds:?} / {:?}",h.region);
-        assert!(!h.hit.contains(bounds.center()),"提示不应扩大岛体交互区域");
+        assert_eq!(h.hit,hit_before_tooltip,"提示不应扩大岛体交互区域");
         h.hover(Pos2::new(900.0,250.0),3.0);
         assert!(h.region.bottom()<100.0,"提示消失后应恢复收起区域");
     }
