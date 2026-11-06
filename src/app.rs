@@ -1069,10 +1069,12 @@ impl App {
         let collapsed=self.settings.collapsed_scale_factor();
         let s=self.island_scale()*(collapsed+(1.0-collapsed)*smoothstep(0.0,0.9,progress));
         let quota_count=self.quota_bar_indices().len();
-        let wrap=(if quota_count>0 && quota_count<=2 {LYRIC_BAR_W-170.0}else{LYRIC_BAR_W-80.0}).max(90.0)*s;
+        let ai_right=self.lyric_ai_sides().1>0;
+        let wrap=(if ai_right {LYRIC_BAR_W-80.0}else if quota_count>0 && quota_count<=2 {LYRIC_BAR_W-170.0}else{LYRIC_BAR_W-80.0}).max(90.0)*s;
+        let align=if ai_right {egui::Align::Min}else{egui::Align::Center};
         let line_layout=|text:&str,font_size:f32,color:egui::Color32| {
             let mut job=egui::text::LayoutJob::simple(text.to_owned(),theme::font(font_size*s,W::Regular),color,wrap);
-            job.halign=egui::Align::Center;
+            job.halign=align;
             job.wrap.break_anywhere=true;
             job.wrap.max_rows=1;
             job.wrap.overflow_character=Some('…');
@@ -1081,7 +1083,7 @@ impl App {
         if let Some(translated)=translation {
             // 原文和翻译各自一个单行 galley，分别截断，避免 max_rows 把第二行整行裁掉。
             let mut original=egui::text::LayoutJob::simple(text,theme::font(11.0*s,W::Semibold),ink,wrap);
-            original.halign=egui::Align::Center;
+            original.halign=align;
             original.wrap.break_anywhere=true;
             original.wrap.max_rows=1;
             original.wrap.overflow_character=Some('…');
@@ -1091,7 +1093,7 @@ impl App {
         }
         let layout=|text:String| {
             let mut job=egui::text::LayoutJob::simple(text,theme::font(11.0*s,W::Semibold),ink,wrap);
-            job.halign=egui::Align::Center;
+            job.halign=align;
             job.wrap.break_anywhere=true;
             ctx.fonts(|fonts|fonts.layout_job(job))
         };
@@ -1122,9 +1124,8 @@ impl App {
         if !self.island_lyrics_active(){return(0,0);}
         let indices=self.quota_bar_indices();
         if indices.is_empty()||indices.len()>2||self.quota.config.ring!=crate::quota::RingLabel::Auto{return(0,0);}
-        if indices.len()==2{return(1,1);}
-        let side=self.quota.config.side_of(&self.quota.config.accounts[indices[0]].id);
-        if side==crate::quota::Side::Left{(1,0)}else{(0,1)}
+        // 歌词播放时所有 AI logo 统一追加在最右侧，不挤占左侧专辑/吉祥物和歌词位置。
+        (0,indices.len())
     }
     pub(crate) fn lyric_bar_width(&self)->f32 {
         let quotas=self.quota_bar_indices().len();
@@ -1605,8 +1606,8 @@ impl App {
             let width=(self.w.pos/base.s).max(content_width);
             let left=local_cx-width/2.0;
             let center_y=BAR_H/2.0;
-            let (left_ai,right_ai)=self.lyric_ai_sides();
-            let art_x=left+12.0+left_ai as f32*40.0;
+            let (_left_ai,right_ai)=self.lyric_ai_sides();
+            let art_x=left+12.0;
             if let Some((image,texture))=&self.music_artwork {
                 let [width,height]=image.size;
                 let uv_size=if width>height {egui::vec2(height as f32/width as f32,1.0)}else{egui::vec2(1.0,width as f32/height as f32)};
@@ -1624,11 +1625,13 @@ impl App {
             let original_height=galley.size().y;
             let total=original_height+translation.as_ref().map(|g|g.size().y+gap).unwrap_or(0.0);
             let top=center_y-total/(2.0*base.s)+(1.0-fade)*3.0;
-            let x=left+content_width-LYRIC_BAR_W/2.0;
+            let (x,tx)=if right_ai==0 {
+                let x=left+content_width-LYRIC_BAR_W/2.0;(x,x)
+            }else{(left+90.0,left+90.0)};
             c.painter.galley(c.pos(x,top),galley,if lyric.is_some(){theme::WHITE}else{theme::GRAY});
             if let Some(translated)=translation {
                 let y=top+(original_height+gap)/base.s;
-                c.painter.galley(c.pos(x,y),translated,theme::GRAY);
+                c.painter.galley(c.pos(tx,y),translated,theme::GRAY);
             }
             paint::playback_bars(&c,left+content_width-21.0-right_ai as f32*40.0,center_y,self.t,self.media.playing,theme::WHITE);
             if self.pomo.running {

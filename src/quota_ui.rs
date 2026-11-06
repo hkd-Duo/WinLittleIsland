@@ -183,7 +183,7 @@ impl App {
             let left:Vec<usize>=indices.iter().copied().filter(|i|self.quota.config.side_of(&self.quota.config.accounts[*i].id)==quota::Side::Left).collect();
             let ordered:Vec<usize>=left.iter().copied().chain(indices.iter().copied().filter(|i|!left.contains(i))).collect();
             let lyric_mode=self.island_lyrics_active();
-            let (left_ai,_right_ai)=self.lyric_ai_sides();
+            let (left_ai,right_ai)=self.lyric_ai_sides();
             let content_width=self.lyric_bar_width()-self.lyric_focus_space();
             let left_edge=cx-content_width/2.0;let right_edge=cx+content_width/2.0;
             for (position,&i) in ordered.iter().enumerate(){
@@ -192,7 +192,7 @@ impl App {
                 let a=&self.quota.config.accounts[i];let snapshot=self.quota.rows.get(&a.id).and_then(|r|r.as_ref().ok());
                 let width=40.0;
                 let x=if lyric_mode{
-                    if ordered.len()==2{if position==0{left_edge+20.0}else{right_edge-20.0}}
+                    if ordered.len()==2{right_edge-20.0-(ordered.len()-1-position) as f32*40.0}
                     else if left_ai>0{left_edge+20.0}else{right_edge-20.0}
                 }else{cx+layout.x[crate::bar_layout::QUOTA+position].unwrap()};
                 let left=x-width/2.0;
