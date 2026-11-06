@@ -32,39 +32,32 @@ jobs:
       - name: 解析版本并校验发行文件
         id: meta
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          $ErrorActionPreference = 'Stop'
+          trap { "::error title=发布校验失败::$($_.Exception.Message)"; throw }
           $event = '${{ github.event_name }}'
+          $ref = '${{ github.ref }}'
           $tag = ''
-          if ($event -ceq 'workflow_dispatch') {
-            $tag = '${{ inputs.tag }}'
-          } elseif ($env:GITHUB_REF -like 'refs/tags/*') {
-            $tag = $env:GITHUB_REF_NAME
-          }
+          if ($event -ceq 'workflow_dispatch') { $tag = '${{ inputs.tag }}' }
+          elseif ($ref -like 'refs/tags/*') { $tag = '${{ github.ref_name }}' }
+          $cargoVersion = ([regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version = "([^"]+)"').Groups[1].Value).Trim()
           if (-not $tag) {
-            # 分支推送：只有当前版本已经有 tag、且还没有发布过时才发布。
-            $version = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version = "([^"]+)"').Groups[1].Value
-            $tag = "v$version"
-            git fetch --tags --force --quiet origin
-            git rev-parse -q --verify "refs/tags/$tag" *> $null
-            if ($LASTEXITCODE -ne 0) { "release=false" >> $env:GITHUB_OUTPUT; "当前版本 $tag 还没有 tag，跳过发布"; exit 0 }
-            gh release view $tag *> $null
-            if ($LASTEXITCODE -eq 0) { "release=false" >> $env:GITHUB_OUTPUT; "$tag 已发布过，跳过"; exit 0 }
+            $tag = "v$cargoVersion"
+            $found = @(git ls-remote --tags origin "refs/tags/$tag" 2>$null)
+            if ($LASTEXITCODE -ne 0 -or $found.Count -eq 0) { "release=false" >> $env:GITHUB_OUTPUT; "tag $tag 尚未创建，跳过发布"; exit 0 }
           }
           if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "无效的 tag：$tag" }
           $version = $tag.Substring(1)
-          $cargoVersion = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version = "([^"]+)"').Groups[1].Value
           if ($cargoVersion -ne $version) { throw "Cargo.toml 版本 $cargoVersion 与 tag $tag 不一致" }
           $directory = Join-Path $PWD "release/$tag"
-          if (-not (Test-Path -LiteralPath $directory)) { throw "缺少发行文件目录 release/$tag" }
+          if (-not (Test-Path -LiteralPath $directory)) { "release=false" >> $env:GITHUB_OUTPUT; "release/$tag 不存在，跳过发布"; exit 0 }
           $expected = @(
             "WinLittleIsland-Setup-$tag-x64.exe",
             "WinLittleIsland-$tag-windows-x64.zip",
             'SHA256SUMS.txt'
           )
-          $actual = @(Get-ChildItem -LiteralPath $directory -File | ForEach-Object { $_.Name } | Sort-Object)
-          if (($actual -join '|') -ne (($expected | Sort-Object) -join '|')) { throw "release/$tag 文件不符合约定：$($actual -join ', ')" }
+          $actual = @(Get-ChildItem -LiteralPath $directory -File | ForEach-Object { $_.Name })
+          if ((($actual | Sort-Object) -join '|') -ne (($expected | Sort-Object) -join '|')) { throw "release/$tag 文件不符合约定：$($actual -join ', ')" }
           foreach ($line in Get-Content -LiteralPath (Join-Path $directory 'SHA256SUMS.txt')) {
             if ($line -notmatch '^([0-9a-f]{64})  (\S+)$') { throw "SHA256SUMS.txt 格式异常：$line" }
             $hash = $Matches[1]; $name = $Matches[2]
@@ -93,12 +86,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          $ErrorActionPreference = 'Stop'
+          trap { "::error title=发布失败::$($_.Exception.Message)"; throw }
           $tag = '${{ steps.meta.outputs.tag }}'
+          $event = '${{ github.event_name }}'
+          $ref = '${{ github.ref }}'
           $directory = Join-Path $PWD "release/$tag"
           $assets = @(Get-ChildItem -LiteralPath $directory -File | ForEach-Object { $_.FullName })
           $notes = Join-Path $env:RUNNER_TEMP 'release-notes.md'
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
+            if ($event -ceq 'push' -and $ref -like 'refs/heads/*') { "已发布过 $tag，跳过"; exit 0 }
             gh release upload $tag @assets --clobber
             gh release edit $tag --title "WinLittleIsland $tag" --notes-file $notes --latest
           } else {
