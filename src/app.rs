@@ -1117,6 +1117,15 @@ impl App {
     pub(crate) fn pet_enabled(&self)->bool {self.settings.pet && !self.effective_minimal()}
     pub(crate) fn pet_space(&self)->f32 {if self.pet_enabled(){44.0}else{0.0}}
     pub(crate) fn lyric_focus_space(&self)->f32 {if self.pomo.running{crate::focus_bar::LYRIC_WIDTH+10.0}else{0.0}}
+    /// 歌词模式下 AI 圆形组件占用的左右端位置数量；2 个时固定分居两端。
+    pub(crate) fn lyric_ai_sides(&self)->(usize,usize){
+        if !self.island_lyrics_active(){return(0,0);}
+        let indices=self.quota_bar_indices();
+        if indices.is_empty()||indices.len()>2||self.quota.config.ring!=crate::quota::RingLabel::Auto{return(0,0);}
+        if indices.len()==2{return(1,1);}
+        let side=self.quota.config.side_of(&self.quota.config.accounts[indices[0]].id);
+        if side==crate::quota::Side::Left{(1,0)}else{(0,1)}
+    }
     pub(crate) fn lyric_bar_width(&self)->f32 {
         let quotas=self.quota_bar_indices().len();
         let extra=if quotas>0 && quotas<=2 {quotas as f32*40.0}else{0.0};
@@ -1234,7 +1243,7 @@ impl App {
         if self.settings.clock_period!=0 { layout.widen_clock(40.0); }
         if self.pet_enabled() {
             if let Some(a)=self.notice.as_ref().filter(|_|!self.compact_notices()&&!self.open){layout.x[bar::PET]=Some(22.0-(self.notice_size(a).0+self.pet_space())/2.0);}
-            else if self.island_lyrics_active() {layout.x[bar::PET]=Some(60.0-self.lyric_bar_width()/2.0);}
+            else if self.island_lyrics_active() {let (left_ai,_)=self.lyric_ai_sides();layout.x[bar::PET]=Some(60.0+left_ai as f32*40.0-self.lyric_bar_width()/2.0);} 
         }
         self.resident.step(layout,dt,ctx.style().animation_time>0.0&&bar::animations_enabled());
         if self.opts.fetch_lyrics {
@@ -1596,14 +1605,16 @@ impl App {
             let width=(self.w.pos/base.s).max(content_width);
             let left=local_cx-width/2.0;
             let center_y=BAR_H/2.0;
+            let (left_ai,right_ai)=self.lyric_ai_sides();
+            let art_x=left+12.0+left_ai as f32*40.0;
             if let Some((image,texture))=&self.music_artwork {
                 let [width,height]=image.size;
                 let uv_size=if width>height {egui::vec2(height as f32/width as f32,1.0)}else{egui::vec2(1.0,width as f32/height as f32)};
                 let uv=Rect::from_center_size(Pos2::new(0.5,0.5),uv_size);
-                c.painter.add(egui::epaint::RectShape::filled(c.rect(left+12.0,center_y-10.0,20.0,20.0),5.0*c.s,Color32::WHITE).with_texture(texture.id(),uv));
+                c.painter.add(egui::epaint::RectShape::filled(c.rect(art_x,center_y-10.0,20.0,20.0),5.0*c.s,Color32::WHITE).with_texture(texture.id(),uv));
             } else {
-                c.fill(left+12.0,center_y-10.0,20.0,20.0,5.0,theme::CARD);
-                paint::note(&c,left+22.0,center_y,13.0,theme::WHITE);
+                c.fill(art_x,center_y-10.0,20.0,20.0,5.0,theme::CARD);
+                paint::note(&c,art_x+10.0,center_y,13.0,theme::WHITE);
             }
             let index=lyric.map_or(0,|(index,_)|index);
             let shown=c.ui.ctx().animate_value_with_time(egui::Id::new(("island-lyric-line",&self.ly.key)),index as f32,0.18);
@@ -1619,7 +1630,7 @@ impl App {
                 let y=top+(original_height+gap)/base.s;
                 c.painter.galley(c.pos(x,y),translated,theme::GRAY);
             }
-            paint::playback_bars(&c,left+content_width-21.0,center_y,self.t,self.media.playing,theme::WHITE);
+            paint::playback_bars(&c,left+content_width-21.0-right_ai as f32*40.0,center_y,self.t,self.media.playing,theme::WHITE);
             if self.pomo.running {
                 let alpha=smoothstep(0.88,1.0,(width-content_width)/self.lyric_focus_space());
                 crate::focus_bar::draw(&c.faded(alpha),left+width-14.0-crate::focus_bar::LYRIC_WIDTH/2.0,center_y,self.t,&self.pomo,self.phase_secs(self.pomo.phase),true);
