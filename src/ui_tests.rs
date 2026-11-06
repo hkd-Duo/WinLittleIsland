@@ -3793,7 +3793,7 @@ fn about_page_shows_github_link() {
             if frame==3 {
                 {
                     let find=|label:&str|child.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t) if t.galley.text()==label=>Some((t.visual_bounding_rect(),s.clip_rect)),_=>None});
-                    let (rect,clip)=find("github.com/hkd-Duo/Daozai").expect("关于页必须直接展示 GitHub 地址");
+                    let (rect,clip)=find("github.com/hkd-Duo/WinLittleIsland").expect("关于页必须直接展示 GitHub 地址");
                     assert!(clip.contains_rect(rect),"默认窗口中 GitHub 地址不能被裁切");
                     let (rect,clip)=find("打开 GitHub").expect("关于页需要可点击的 GitHub 入口");
                     assert!(clip.contains_rect(rect),"默认窗口中 GitHub 按钮不能被裁切");

@@ -557,8 +557,7 @@ fn gallery() {
             ras.free_textures(&output.textures_delta);
         }
         let path=format!("{dest}/scene-{scene}.png");
-        let mut ff=Command::new("ffmpeg").args(["-y","-loglevel","error","-f","rawvideo","-pix_fmt","rgba","-s","1280x380","-i","-","-frames:v","1",&path]).stdin(Stdio::piped()).spawn().unwrap();
-        ff.stdin.take().unwrap().write_all(&rgba).unwrap();assert!(ff.wait().unwrap().success());
+        image::save_buffer(&path,&rgba,1280,380,image::ColorType::Rgba8).unwrap();
     }
     // 仅移除本次创建的独立演示目录。
     let _=std::fs::remove_dir_all(root);

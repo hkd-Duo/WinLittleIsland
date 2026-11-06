@@ -10,7 +10,7 @@ Unicode true
   !define APP_ID "Daozai"
 !endif
 !ifndef APP_NAME
-  !define APP_NAME "岛仔"
+  !define APP_NAME "WinLittleIsland"
 !endif
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_ID}"
 Name "${APP_NAME}"
@@ -97,7 +97,7 @@ FunctionEnd
 
 Function InstallPage
   ${If} $UpgradeMode == 1
-    !insertmacro MUI_HEADER_TEXT "升级岛仔" "检测到已安装版本，设置和记录会保留"
+    !insertmacro MUI_HEADER_TEXT "升级 WinLittleIsland" "检测到已安装版本，设置和记录会保留"
   ${Else}
     !insertmacro MUI_HEADER_TEXT "欢迎使用岛仔" "Windows 顶部的桌面伙伴"
   ${EndIf}
@@ -241,9 +241,9 @@ Section "安装"
   ${EndIf}
   CreateShortcut "$SMPROGRAMS\${APP_NAME}.lnk" "$INSTDIR\daozai.exe"
   CreateShortcut "$SMPROGRAMS\${APP_NAME}设置.lnk" "$INSTDIR\daozai.exe" "--settings"
-  WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "${APP_NAME} Daozai"
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "${APP_NAME}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "${APP_VERSION}"
-  WriteRegStr HKCU "${UNINSTALL_KEY}" "Publisher" "岛仔"
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "Publisher" "WinLittleIsland"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\daozai.exe,0"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "UninstallString" '"$INSTDIR\Uninstall.exe"'

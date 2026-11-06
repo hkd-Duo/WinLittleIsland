@@ -6,7 +6,7 @@ use crate::theme::{self, size, W};
 use eframe::egui::{self, Color32, Rect};
 
 /// 关于页直接展示的项目地址：源码、版本更新与问题反馈都从这里进入。
-const GITHUB_HOME: &str = "https://github.com/hkd-Duo/Daozai";
+const GITHUB_HOME: &str = "https://github.com/hkd-Duo/WinLittleIsland";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AlertSource { Internal, External(String) }
@@ -848,7 +848,7 @@ impl App {
         if !self.settings_open{return;}
         let id=egui::ViewportId::from_hash_of("daozai-settings");
         let focus_requested=std::mem::take(&mut self.settings_focus_requested);
-        ctx.show_viewport_immediate(id,egui::ViewportBuilder::default().with_title("岛仔设置").with_icon(theme::app_icon()).with_inner_size([690.0,560.0]).with_min_inner_size([600.0,450.0]).with_visible(false).with_active(false).with_window_level(egui::WindowLevel::Normal),|ctx,_|{
+        ctx.show_viewport_immediate(id,egui::ViewportBuilder::default().with_title("WinLittleIsland 设置").with_icon(theme::app_icon()).with_inner_size([690.0,560.0]).with_min_inner_size([600.0,450.0]).with_visible(false).with_active(false).with_window_level(egui::WindowLevel::Normal),|ctx,_|{
             let dark=self.settings.settings_theme.dark(crate::settings_theme::system_dark(ctx));
             let original_style=ctx.style();
             let mut style=(*original_style).clone();
@@ -1413,7 +1413,7 @@ impl App {
                         });
                     }
                     _=>{
-                        settings_label(ui,"岛仔 Daozai");
+                        settings_label(ui,"WinLittleIsland · 岛仔");
                         settings_card(ui,|ui|{
                             ui.horizontal(|ui|{
                                 ui.label(egui::RichText::new(format!("版本 {}",env!("CARGO_PKG_VERSION"))).size(13.0));
@@ -1429,11 +1429,11 @@ impl App {
                         });
                         settings_label(ui,"GitHub");
                         settings_card(ui,|ui|{
-                            ui.label(egui::RichText::new("岛仔在 GitHub 开源，源码、版本更新和问题反馈都在这里。").size(12.5));
+                            ui.label(egui::RichText::new("WinLittleIsland 在 GitHub 开源，源码、版本更新和问题反馈都在这里。").size(12.5));
                             ui.add_space(4.0);
                             ui.horizontal(|ui|{
                                 if ui.add_sized([118.0,32.0],egui::Button::new("打开 GitHub")).clicked(){self.pending.push(Cmd::OpenUrl(GITHUB_HOME.into()));}
-                                ui.hyperlink_to(egui::RichText::new("github.com/hkd-Duo/Daozai").size(12.0)
+                                ui.hyperlink_to(egui::RichText::new("github.com/hkd-Duo/WinLittleIsland").size(12.0)
                                     .color(settings_color(ctx,Color32::from_rgb(120,185,245),Color32::from_rgb(26,100,177))),GITHUB_HOME);
                             });
                         });

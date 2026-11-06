@@ -578,7 +578,7 @@ fn run() -> eframe::Result<()> {
     // 首帧就按用户保存的岛体大小创建画布，避免启动时先小后大的跳动。
     let initial_scale=daozai::model::Settings::load().island_scale_factor();
     let viewport = egui::ViewportBuilder::default()
-        .with_title("岛仔").with_icon(daozai::theme::app_icon())
+        .with_title("WinLittleIsland").with_icon(daozai::theme::app_icon())
         .with_inner_size([app::CANVAS_W*initial_scale, app::WIN_H*initial_scale])
         .with_decorations(false)
         .with_transparent(true)
