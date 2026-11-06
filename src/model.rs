@@ -1,4 +1,4 @@
-﻿//! 持久化与状态模型。
+//! 持久化与状态模型。
 //!
 //! 文件布局与原工具同名同结构（原工具字符串中可见的路径与键名），但默认目录
 //! 用独立的 `%APPDATA%\Daozai`，避免与原工具的 `%APPDATA%\Nusa` 互相覆盖：
@@ -107,6 +107,10 @@ pub struct Settings {
     pub lyrics_enabled:bool,
     pub island_lyrics:bool,
     pub lyric_delay_ms:i32,
+    /// 岛体大小：80..=140 的整数百分比，100 为原尺寸。
+    pub island_scale:u32,
+    /// 收起时额外放大：80..=200，100 表示与岛体大小一致。
+    pub collapsed_scale:u32,
     pub hide_fullscreen: bool,
     pub focus_minutes: u32,
     pub rest_minutes: u32,
@@ -129,11 +133,20 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
+        Self { display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, island_scale:100, collapsed_scale:100, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
     }
 }
 
 impl Settings {
+    /// 岛体整体缩放比例（1.0 = 100%）。
+    pub fn island_scale_factor(&self) -> f32 {
+        self.island_scale.clamp(80, 140) as f32 / 100.0
+    }
+    /// 收起状态再乘一次；展开后回到 100%，所以在 4K 屏幕上只放大最小化形态。
+    pub fn collapsed_scale_factor(&self) -> f32 {
+        self.collapsed_scale.clamp(80, 200) as f32 / 100.0
+    }
+
     pub fn clock_text(&self, clock: &str) -> String {
         use chrono::Timelike;
         let Ok(time) = chrono::NaiveTime::parse_from_str(clock.get(..5).unwrap_or(""), "%H:%M") else { return "--:--".into(); };
@@ -185,6 +198,9 @@ impl Settings {
                 "lyrics_enabled" => s.lyrics_enabled=v!="0",
                 "island_lyrics" => s.island_lyrics=v=="1",
                 "lyric_delay_ms" => s.lyric_delay_ms=v.parse::<i32>().unwrap_or(-350).clamp(-5000,5000),
+                // 岛体缩放是外观设置，非法值回到默认 100%，避免启动时岛体消失。
+                "island_scale" => s.island_scale=v.parse::<u32>().unwrap_or(100).clamp(80,140),
+                "collapsed_scale" => s.collapsed_scale=v.parse::<u32>().unwrap_or(100).clamp(80,200),
                 "hide_fullscreen" => s.hide_fullscreen = v != "0",
                 "focus_minutes" => s.focus_minutes = v.parse::<u32>().unwrap_or(25).clamp(1, 180),
                 "rest_minutes" | "short_minutes" => s.rest_minutes = v.parse::<u32>().unwrap_or(5).clamp(1, 60),
@@ -233,6 +249,8 @@ impl Settings {
                 ("lyrics_enabled".into(),(self.lyrics_enabled as u8).to_string()),
                 ("island_lyrics".into(),(self.island_lyrics as u8).to_string()),
                 ("lyric_delay_ms".into(),self.lyric_delay_ms.to_string()),
+                ("island_scale".into(),self.island_scale.clamp(80,140).to_string()),
+                ("collapsed_scale".into(),self.collapsed_scale.clamp(80,200).to_string()),
                 ("hide_fullscreen".into(), (self.hide_fullscreen as u8).to_string()),
                 ("focus_minutes".into(), self.focus_minutes.to_string()),
                 ("rest_minutes".into(), self.rest_minutes.to_string()),
@@ -553,6 +571,35 @@ mod tests {
         assert_eq!(human_size(1024), "1.0 KB");
         assert_eq!(human_size(1536 * 1024), "1.5 MB");
         assert_eq!(human_size(2 * 1024 * 1024 * 1024), "2.0 GB");
+    }
+
+    #[test]
+    fn island_scale_defaults_clamps_and_round_trips_safely() {
+        let old = std::env::var_os("DAOZAI_DATA_DIR");
+        let dir = std::env::temp_dir().join(format!("daozai-island-scale-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("DAOZAI_DATA_DIR", &dir);
+        let settings = Settings::default();
+        assert_eq!(settings.island_scale, 100);
+        assert_eq!(settings.collapsed_scale, 100);
+        assert!((settings.island_scale_factor() - 1.0).abs() < f32::EPSILON);
+        let mut custom = Settings::default();
+        custom.island_scale = 125;
+        custom.collapsed_scale = 160;
+        custom.save();
+        let loaded = Settings::load();
+        assert_eq!(loaded.island_scale, 125);
+        assert_eq!(loaded.collapsed_scale, 160);
+        assert!((loaded.island_scale_factor() - 1.25).abs() < 1e-6);
+        assert!((loaded.collapsed_scale_factor() - 1.6).abs() < 1e-6);
+        fs::write(dir.join("settings.txt"), "island_scale=999\ncollapsed_scale=999\n").unwrap();
+        assert_eq!(Settings::load().island_scale, 140, "越界大小应夹到 140%");
+        assert_eq!(Settings::load().collapsed_scale, 200, "收起时大小应夹到 200%");
+        fs::write(dir.join("settings.txt"), "island_scale=oops\ncollapsed_scale=oops\n").unwrap();
+        assert_eq!(Settings::load().island_scale, 100, "损坏值应回到默认 100%");
+        assert_eq!(Settings::load().collapsed_scale, 100, "损坏的收起时大小应回到默认 100%");
+        if let Some(old) = old { std::env::set_var("DAOZAI_DATA_DIR", old); } else { std::env::remove_var("DAOZAI_DATA_DIR"); }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

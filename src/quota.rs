@@ -8,6 +8,10 @@ pub(crate) mod grok;
 pub(crate) mod gemini;
 #[path="claude_quota.rs"]
 mod claude;
+#[path="deepseek_quota.rs"]
+pub(crate) mod deepseek;
+#[path="glm_quota.rs"]
+pub(crate) mod glm;
 #[path="native_auth.rs"]
 mod native_auth;
 
@@ -20,14 +24,35 @@ impl Discovery {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini }
+pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini, DeepSeek, Glm }
 impl Provider {
-    pub const ALL: [Self; 5] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini];
-    pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini"} }
-    fn parse(s: &str) -> Option<Self> {if s.eq_ignore_ascii_case("grokbot"){return Some(Self::GrokBot);}Self::ALL.into_iter().find(|p|p.name().eq_ignore_ascii_case(s))}
+    pub const ALL: [Self; 7] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini, Self::DeepSeek, Self::Glm];
+    pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini",Self::DeepSeek=>"DeepSeek",Self::Glm=>"GLM"} }
+    fn parse(s: &str) -> Option<Self> {
+        if s.eq_ignore_ascii_case("grokbot"){return Some(Self::GrokBot);}
+        if s.eq_ignore_ascii_case("zhipu")||s.eq_ignore_ascii_case("智谱"){return Some(Self::Glm);}
+        Self::ALL.into_iter().find(|p|p.name().eq_ignore_ascii_case(s))
+    }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Accent { #[default] Brand, Violet, Orange, Blue, Cyan, Pink, Gold, Green }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Side { #[default] Auto, Left, Right }
+impl Side {
+    pub const ALL:[Self;3]=[Self::Auto,Self::Left,Self::Right];
+    pub fn key(self)->&'static str{match self{Self::Auto=>"auto",Self::Left=>"left",Self::Right=>"right"}}
+    pub fn label(self)->&'static str{match self{Self::Auto=>"自动",Self::Left=>"靠左",Self::Right=>"靠右"}}
+    fn parse(key:&str)->Self{Self::ALL.into_iter().find(|s|s.key()==key).unwrap_or_default()}
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RingLabel { #[default] Auto, Logo, Value }
+impl RingLabel {
+    pub const ALL:[Self;3]=[Self::Auto,Self::Logo,Self::Value];
+    pub fn key(self)->&'static str{match self{Self::Auto=>"auto",Self::Logo=>"logo",Self::Value=>"value"}}
+    pub fn label(self)->&'static str{match self{Self::Auto=>"自动",Self::Logo=>"Logo",Self::Value=>"数值"}}
+    pub fn hint(self)->&'static str{match self{Self::Auto=>"金额/百分比 + 右上角 Logo",Self::Logo=>"只显示厂商 Logo",Self::Value=>"只显示金额/百分比"}}
+    fn parse(key:&str)->Self{Self::ALL.into_iter().find(|c|c.key()==key).unwrap_or_default()}
+}
 impl Accent {
     pub const ALL:[Self;8]=[Self::Brand,Self::Violet,Self::Orange,Self::Blue,Self::Cyan,Self::Pink,Self::Gold,Self::Green];
     pub fn key(self)->&'static str{match self{Self::Brand=>"brand",Self::Violet=>"violet",Self::Orange=>"orange",Self::Blue=>"blue",Self::Cyan=>"cyan",Self::Pink=>"pink",Self::Gold=>"gold",Self::Green=>"green"}}
@@ -37,8 +62,8 @@ impl Accent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Account {pub id:String, pub provider:Provider, pub alias:String, pub source:PathBuf, pub slot:Option<String>, pub enabled:bool, pub pinned:bool}
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Config {pub enabled:bool, pub compact:bool, pub selected:String, pub accounts:Vec<Account>, pub colors:HashMap<String,Accent>}
-impl Default for Config {fn default()->Self {Self{enabled:true,compact:true,selected:String::new(),accounts:vec![],colors:HashMap::new()}}}
+pub struct Config {pub enabled:bool, pub compact:bool, pub selected:String, pub accounts:Vec<Account>, pub colors:HashMap<String,Accent>, pub ring:RingLabel, pub sides:HashMap<String,Side>}
+impl Default for Config {fn default()->Self {Self{enabled:true,compact:true,selected:String::new(),accounts:vec![],colors:HashMap::new(),ring:RingLabel::Auto,sides:HashMap::new()}}}
 impl Config {
     pub fn load()->Self {
         let path=crate::model::config_dir().join("ai-quota.json");
@@ -50,14 +75,17 @@ impl Config {
             id:a["id"].as_str()?.into(),provider:Provider::parse(a["provider"].as_str()?)?,alias:a["alias"].as_str()?.into(),source:PathBuf::from(a["source"].as_str()?),slot:a["slot"].as_str().map(str::to_owned),enabled:a["enabled"].as_bool().unwrap_or(true),pinned:a["pinned"].as_bool().unwrap_or(false)
         })).collect();
         let colors=v["colors"].as_object().into_iter().flatten().filter_map(|(id,value)|{let color=Accent::parse(value.as_str()?);(color!=Accent::Brand).then(||(id.clone(),color))}).collect();
-        Self{enabled:v["enabled"].as_bool().unwrap_or(true),compact:v["compact"].as_bool().unwrap_or(true),selected:v["selected"].as_str().unwrap_or_default().into(),accounts,colors}
+        let sides=v["sides"].as_object().into_iter().flatten().filter_map(|(id,value)|{let side=Side::parse(value.as_str()?);(side!=Side::Auto).then(||(id.clone(),side))}).collect();
+        Self{enabled:v["enabled"].as_bool().unwrap_or(true),compact:v["compact"].as_bool().unwrap_or(true),selected:v["selected"].as_str().unwrap_or_default().into(),accounts,colors,ring:RingLabel::parse(v["ring"].as_str().unwrap_or("auto")),sides}
     }
-    fn json(&self)->Value {let colors:serde_json::Map<String,Value>=self.colors.iter().map(|(id,color)|(id.clone(),json!(color.key()))).collect();json!({"enabled":self.enabled,"compact":self.compact,"selected":self.selected,"colors":colors,"accounts":self.accounts.iter().map(|a|json!({"id":a.id,"provider":a.provider.name(),"alias":a.alias,"source":a.source,"slot":a.slot,"enabled":a.enabled,"pinned":a.pinned})).collect::<Vec<_>>()})}
+    fn json(&self)->Value {let colors:serde_json::Map<String,Value>=self.colors.iter().map(|(id,color)|(id.clone(),json!(color.key()))).collect();let sides:serde_json::Map<String,Value>=self.sides.iter().map(|(id,side)|(id.clone(),json!(side.key()))).collect();json!({"enabled":self.enabled,"compact":self.compact,"selected":self.selected,"ring":self.ring.key(),"sides":sides,"colors":colors,"accounts":self.accounts.iter().map(|a|json!({"id":a.id,"provider":a.provider.name(),"alias":a.alias,"source":a.source,"slot":a.slot,"enabled":a.enabled,"pinned":a.pinned})).collect::<Vec<_>>()})}
     pub fn save(&self) {
         let dir=crate::model::config_dir();let _=fs::create_dir_all(&dir);
         if let Ok(raw)=serde_json::to_vec_pretty(&self.json()){let _=crate::model::atomic_write(&dir.join("ai-quota.json"),&raw);}
     }
     pub fn add(&mut self,provider:Provider,alias:String,source:PathBuf)->Result<(),String>{
+        if provider==Provider::DeepSeek{return Err("请使用 API Key 连接 DeepSeek".into());}
+        if provider==Provider::Glm{return Err("请使用 API Key 连接 GLM".into());}
         if provider==Provider::Gemini{return Err("请使用浏览器或 Cookie 连接 Gemini 网页账号".into());}
         if provider==Provider::GrokBot{return self.import_grok(&source,&alias).map(|_|());}
         if provider==Provider::Claude&&claude::is_desktop(&source){return self.import_claude(&source,&alias).map(|_|());}
@@ -86,6 +114,37 @@ impl Config {
         }
         let id=format!("Gemini-{slot}");let pinned=self.pinned_indices().len()<3;
         self.selected=id.clone();self.accounts.push(Account{id:id.clone(),provider:Provider::Gemini,alias,source:PathBuf::new(),slot:Some(slot),enabled:true,pinned});id
+    }
+    pub(crate) fn connect_glm(&mut self,alias:String,api_key:String)->Result<String,String>{
+        let key=api_key.trim();
+        if key.len()<8{return Err("请填写有效的 GLM API Key".into());}
+        let slot=glm::slot_of(key);
+        glm::save_key(&slot,key)?;
+        if let Some(a)=self.accounts.iter_mut().find(|a|a.provider==Provider::Glm && a.slot.as_deref()==Some(&slot)){
+            a.enabled=true;if !alias.trim().is_empty(){a.alias=alias;}self.selected=a.id.clone();return Ok(a.id.clone());
+        }
+        let id=format!("GLM-{slot}");
+        let pinned=self.accounts.is_empty() || self.pinned_indices().len()<3;
+        let alias=if alias.trim().is_empty(){format!("GLM · 账号 {}",self.accounts.iter().filter(|a|a.provider==Provider::Glm).count()+1)}else{alias.trim().to_owned()};
+        self.selected=id.clone();
+        self.accounts.push(Account{id:id.clone(),provider:Provider::Glm,alias,source:PathBuf::new(),slot:Some(slot),enabled:true,pinned});
+        Ok(id)
+    }
+    /// DeepSeek 使用 API Key，不落配置，只把 Key 存进 Windows 凭据管理器。
+    pub(crate) fn connect_deepseek(&mut self,alias:String,api_key:String)->Result<String,String>{
+        let key=api_key.trim();
+        if key.len()<16{return Err("请填写有效的 DeepSeek API Key".into());}
+        let slot=deepseek::slot_of(key);
+        deepseek::save_key(&slot,key)?;
+        if let Some(a)=self.accounts.iter_mut().find(|a|a.provider==Provider::DeepSeek && a.slot.as_deref()==Some(&slot)){
+            a.enabled=true;if !alias.trim().is_empty(){a.alias=alias;}self.selected=a.id.clone();return Ok(a.id.clone());
+        }
+        let id=format!("DeepSeek-{slot}");
+        let pinned=self.accounts.is_empty() || self.pinned_indices().len()<3;
+        let alias=if alias.trim().is_empty(){format!("DeepSeek · 账号 {}",self.accounts.iter().filter(|a|a.provider==Provider::DeepSeek).count()+1)}else{alias.trim().to_owned()};
+        self.selected=id.clone();
+        self.accounts.push(Account{id:id.clone(),provider:Provider::DeepSeek,alias,source:PathBuf::new(),slot:Some(slot),enabled:true,pinned});
+        Ok(id)
     }
     pub(crate) fn import_grok(&mut self,path:&Path,alias:&str)->Result<usize,String>{
         let profiles=grok::profiles(path)?;let path=fs::canonicalize(path).unwrap_or_else(|_|path.to_owned());let mut added=0;
@@ -141,11 +200,21 @@ impl Config {
     }
     pub fn selected_index(&self)->Option<usize>{self.accounts.iter().position(|a|a.id==self.selected && a.enabled).or_else(||self.accounts.iter().position(|a|a.enabled))}
     pub fn pinned_indices(&self)->Vec<usize>{self.accounts.iter().enumerate().filter_map(|(i,a)|(a.enabled && a.pinned).then_some(i)).collect()}
+    pub fn side_of(&self,id:&str)->Side{self.sides.get(id).copied().unwrap_or_default()}
+    /// 把指定账号移动到目标下标；拖拽排序和胶囊左右顺序共用账号列表顺序。
+    pub fn move_account(&mut self,id:&str,target:usize){
+        if let Some(from)=self.accounts.iter().position(|a|a.id==id){
+            if from!=target{let account=self.accounts.remove(from);let target=target.min(self.accounts.len());self.accounts.insert(target,account);}
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Window {pub label:String,pub seconds:Option<i64>,pub remaining:f32,pub reset:Option<i64>}
+/// DeepSeek 等按金额计费的账户余额；没有周期额度时展示这个字段。
 #[derive(Clone, Debug, Default)]
-pub struct Snapshot {pub plan:String,pub windows:Vec<Window>,pub extra:Vec<Window>,pub at:i64}
+pub struct Balance {pub currency:String,pub total:f64,pub granted:f64,pub topped_up:f64}
+#[derive(Clone, Debug, Default)]
+pub struct Snapshot {pub plan:String,pub windows:Vec<Window>,pub extra:Vec<Window>,pub at:i64,pub balance:Option<Balance>}
 impl Snapshot {
     pub fn rings(&self)->Vec<&Window>{let mut all:Vec<_>=self.windows.iter().collect();all.sort_by_key(|w|w.seconds.unwrap_or(i64::MAX));all.truncate(2);all}
 }
@@ -159,6 +228,8 @@ fn codex_window(v:&Value)->Option<Window>{
 pub fn parse(provider:Provider,v:&Value)->Result<Snapshot,String>{
     if provider==Provider::GrokBot{return grok::parse(v);}
     if provider==Provider::Gemini{return gemini::parse(v);}
+    if provider==Provider::DeepSeek{return deepseek::parse(v);}
+    if provider==Provider::Glm{return glm::parse(v);}
     let mut s=Snapshot{plan:v["plan_type"].as_str().unwrap_or_default().into(),at:chrono::Utc::now().timestamp(),..Default::default()};
     match provider {
         Provider::Codex=>{
@@ -176,7 +247,7 @@ pub fn parse(provider:Provider,v:&Value)->Result<Snapshot,String>{
             if let Some(w)=section(&v["usage"],Some(604800)){s.windows.push(w);}
             for limit in v["limits"].as_array().into_iter().flatten(){let duration=limit["window"]["duration"].as_i64();let unit=limit["window"]["timeUnit"].as_str().unwrap_or_default();let factor=match unit{"TIME_UNIT_MINUTE"=>Some(60),"TIME_UNIT_HOUR"=>Some(3600),"TIME_UNIT_DAY"=>Some(86400),"TIME_UNIT_SECOND"=>Some(1),_=>None};let seconds=duration.zip(factor).and_then(|(d,f)|d.checked_mul(f));if let Some(w)=section(&limit["detail"],seconds){if !s.windows.iter().any(|old|old.seconds==w.seconds){s.windows.push(w);}}}
         }
-        Provider::GrokBot|Provider::Gemini=>unreachable!(),
+        Provider::GrokBot|Provider::Gemini|Provider::DeepSeek|Provider::Glm=>unreachable!(),
     }
     if s.windows.is_empty(){return Err("服务未提供周期额度，暂不绘制进度".into());}
     s.windows.sort_by_key(|w|w.seconds.unwrap_or(i64::MAX));Ok(s)
@@ -194,7 +265,7 @@ fn account_credentials(account:&Account)->Result<Credential,String>{
 fn credentials(provider:Provider,path:&Path)->Result<Credential,String>{
     let root=login_json(path)?;
     let v=if provider==Provider::Codex{root.get("auth_json").unwrap_or(&root)}else{&root};
-    let token=match provider{Provider::Codex=>v.pointer("/tokens/access_token").or_else(||v.get("access_token")),Provider::Claude=>v.pointer("/claudeAiOauth/accessToken"),Provider::Kimi=>v.get("access_token"),Provider::GrokBot|Provider::Gemini=>None}.and_then(Value::as_str).filter(|s|!s.trim().is_empty()).ok_or("未找到订阅账号的登录凭据，请选择对应工具的登录文件")?.to_owned();
+    let token=match provider{Provider::Codex=>v.pointer("/tokens/access_token").or_else(||v.get("access_token")),Provider::Claude=>v.pointer("/claudeAiOauth/accessToken"),Provider::Kimi=>v.get("access_token"),Provider::GrokBot|Provider::Gemini|Provider::DeepSeek|Provider::Glm=>None}.and_then(Value::as_str).filter(|s|!s.trim().is_empty()).ok_or("未找到订阅账号的登录凭据，请选择对应工具的登录文件")?.to_owned();
     let claims=token.split('.').nth(1).and_then(|b|base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b).ok()).and_then(|b|serde_json::from_slice::<Value>(&b).ok()).unwrap_or(Value::Null);
     let account_id=v.pointer("/tokens/account_id").or_else(||v.get("account_id")).and_then(Value::as_str).or_else(||claims.pointer("/https:~1~1api.openai.com~1auth/chatgpt_account_id").and_then(Value::as_str)).filter(|s|!s.is_empty()).map(str::to_owned);
     let identity=match provider{
@@ -242,8 +313,10 @@ fn http_agent()->ureq::Agent{
 fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
     if account.provider==Provider::GrokBot{return grok::fetch(agent,account);}
     if account.provider==Provider::Gemini{return gemini::fetch(agent,account);}
+    if account.provider==Provider::DeepSeek{return deepseek::fetch(agent,account);}
+    if account.provider==Provider::Glm{return glm::fetch(agent,account);}
     let auth=account_credentials(account).map_err(|e|(e,0))?;
-    let url=match account.provider{Provider::Codex=>"https://chatgpt.com/backend-api/wham/usage",Provider::Claude=>"https://api.anthropic.com/api/oauth/usage",Provider::Kimi=>"https://api.kimi.com/coding/v1/usages",Provider::GrokBot|Provider::Gemini=>unreachable!()};
+    let url=match account.provider{Provider::Codex=>"https://chatgpt.com/backend-api/wham/usage",Provider::Claude=>"https://api.anthropic.com/api/oauth/usage",Provider::Kimi=>"https://api.kimi.com/coding/v1/usages",Provider::GrokBot|Provider::Gemini|Provider::DeepSeek|Provider::Glm=>unreachable!()};
     let mut req=agent.get(url).set("Authorization",&format!("Bearer {}",auth.token)).set("Accept","application/json").set("User-Agent","codex-cli/Daozai");
     if account.provider==Provider::Codex{if let Some(id)=&auth.account_id{req=req.set("ChatGPT-Account-Id",id);}}
     if account.provider==Provider::Claude{req=req.set("anthropic-beta","oauth-2025-04-20");}
@@ -305,6 +378,32 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
         }
         let saved=config.clone();assert_eq!(config.discover().added,0);assert_eq!(config,saved,"重复识别不能改变账号和偏好");
     }
+    #[cfg(windows)]
+    #[test]
+    fn deepseek_accounts_store_only_a_keyring_reference() {
+        let key = "sk-synthetic-deepseek-test-key-123456";
+        let mut config = Config::default();
+        assert!(config.add(Provider::DeepSeek, "文件".into(), "auth.json".into()).is_err());
+        let id = config.connect_deepseek("个人".into(), key.into()).unwrap();
+        let account = config.accounts[0].clone();
+        assert_eq!(account.provider, Provider::DeepSeek);
+        assert_eq!(account.id, id);
+        assert!(account.source.as_os_str().is_empty());
+        let saved = config.json().to_string();
+        assert!(!saved.contains(key), "API Key 不能写进配置文件");
+        assert!(saved.contains(&id));
+        let slot = account.slot.clone().unwrap();
+        assert!(deepseek::key_exists(&slot));
+        let same = config.connect_deepseek("工作".into(), key.into()).unwrap();
+        let key_present = deepseek::key_exists(&slot);
+        deepseek::forget(&account);
+        let key_removed = !deepseek::key_exists(&slot);
+        assert_eq!(same, id, "同一 API Key 不能重复添加");
+        assert_eq!(config.accounts.len(), 1);
+        assert_eq!(config.accounts[0].alias, "工作", "重新连接可更新备注");
+        assert!(key_present && key_removed, "移除账号应删除凭据管理器里的 Key");
+    }
+
     #[test] fn gemini_accounts_keep_colors_selection_and_credentials_separate(){
         let mut c=Config::default();let personal=c.connect_gemini("personal".into(),"个人".into());let work=c.connect_gemini("work".into(),"工作".into());c.colors.insert(personal.clone(),Accent::Cyan);c.colors.insert(work.clone(),Accent::Gold);c.accounts[0].pinned=false;
         c.connect_gemini("personal".into(),"个人更新".into());assert_eq!(c.accounts.len(),2);assert_eq!(c.selected,personal);assert!(!c.accounts[0].pinned);assert_eq!(c.colors[&work],Accent::Gold);assert_eq!(Config::from_json(&c.json()),c);let raw=c.json().to_string();assert!(!raw.contains("cookie"));assert!(!raw.contains("access_token"));assert!(c.add(Provider::Gemini,"错误来源".into(),"oauth_creds.json".into()).is_err());
@@ -336,5 +435,33 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
     #[test] fn primary_can_be_weekly_and_missing_is_not_unlimited(){let s=parse(Provider::Codex,&json!({"rate_limit":{"primary_window":{"used_percent":100,"limit_window_seconds":604800}}})).unwrap();assert_eq!(s.rings()[0].label,"本周");assert_eq!(s.rings()[0].remaining,0.0);assert!(parse(Provider::Codex,&json!({"rate_limit":{}})).is_err());assert!(parse(Provider::Codex,&json!({"rate_limit":{"primary_window":{"reset_at":1900000000}}})).is_err());}
     #[test] fn extra_codex_buckets_do_not_replace_main_windows(){let s=parse(Provider::Codex,&json!({"rate_limit":{"secondary_window":{"used_percent":20,"limit_window_seconds":604800}},"additional_rate_limits":[{"limit_name":"reserve","rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":604800}}}]})).unwrap();assert_eq!(s.windows.len(),1);assert_eq!(s.extra[0].remaining,20.0);assert_eq!(s.windows[0].remaining,80.0);}
     #[test] fn claude_null_window_and_kimi_string_numbers(){let c=parse(Provider::Claude,&json!({"five_hour":null,"seven_day":{"utilization":60,"resets_at":"2030-01-01T12:00:00Z"}})).unwrap();assert_eq!(c.rings().len(),1);assert!(c.windows[0].reset.is_some());let k=parse(Provider::Kimi,&json!({"usage":{"limit":"100","remaining":"70"},"limits":[{"window":{"duration":300,"timeUnit":"TIME_UNIT_MINUTE"},"detail":{"limit":"20","used":"5"}}]})).unwrap();assert_eq!(k.rings().len(),2);assert_eq!(k.rings()[0].remaining,75.0);}
+    #[test] fn ring_label_round_trips_in_config(){
+        let mut c=Config::default();assert_eq!(c.ring,RingLabel::Auto);
+        for mode in RingLabel::ALL{c.ring=mode;let raw=c.json();assert_eq!(Config::from_json(&raw).ring,mode);}
+    }
+
+    #[test] fn capsule_drag_order_moves_accounts_without_losing_sides(){
+        let mut c=Config::default();
+        for (id,side) in [("a",Side::Left),("b",Side::Right),("c",Side::Right)]{
+            c.accounts.push(Account{id:id.into(),provider:Provider::DeepSeek,alias:id.into(),source:PathBuf::new(),slot:Some(id.into()),enabled:true,pinned:true});
+            c.sides.insert(id.into(),side);
+        }
+        c.move_account("c",0);
+        assert_eq!(c.accounts.iter().map(|a|a.id.as_str()).collect::<Vec<_>>(),vec!["c","a","b"]);
+        assert_eq!(c.side_of("c"),Side::Right);
+        c.move_account("a",2);
+        assert_eq!(c.accounts.iter().map(|a|a.id.as_str()).collect::<Vec<_>>(),vec!["c","b","a"]);
+        assert_eq!(c.side_of("a"),Side::Left);
+    }
+
+    #[test] fn capsule_sides_are_independent_and_round_trip(){
+        let mut c=Config::default();
+        c.sides.insert("a".into(),Side::Left);c.sides.insert("b".into(),Side::Right);
+        let raw=c.json();let loaded=Config::from_json(&raw);
+        assert_eq!(loaded.side_of("a"),Side::Left);
+        assert_eq!(loaded.side_of("b"),Side::Right);
+        assert_eq!(loaded.side_of("missing"),Side::Auto);
+    }
+
     #[test] fn multi_account_config_keeps_sources_and_selection_separate(){let mut c=Config::default();for n in 1..=2{c.accounts.push(Account{id:n.to_string(),provider:Provider::Codex,alias:format!("账号 {n}"),source:PathBuf::from(format!("profile-{n}/auth.json")),slot:None,enabled:true,pinned:true});}c.selected="2".into();let raw=c.json();assert_eq!(Config::from_json(&raw),c);assert_eq!(c.selected_index(),Some(1));assert_eq!(c.pinned_indices(),vec![0,1]);assert!(!raw.to_string().contains("access_token"));}
 }

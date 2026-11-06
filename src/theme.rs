@@ -2,6 +2,11 @@
 //!
 //! 字体：拉丁/数字用 Segoe UI（Windows 原生 UI 字体，与原版 DirectWrite 渲染同源），
 //! 中文回退到微软雅黑 UI。三档字重：常规 / 半粗 / 粗。
+//! 微软雅黑不含日文假名/生僻字、韩文谚文、泰文、印度系、阿拉伯/希伯来/越南语字形，
+//! 因此每档字重都在中文之后、egui 内置字体之前追加脚本回退：
+//! 日文 Yu Gothic UI（常规/半粗/粗，回退 Yu Gothic / Meiryo / MS Gothic）、
+//! 韩文 Malgun Gothic、泰文 Leelawadee UI、印度系 Nirmala UI、
+//! 阿拉伯/希伯来/越南语 Tahoma。系统缺失的字体自动跳过。
 //! 非 Windows（开发机、录屏）按 `DAOZAI_FONT_DIR` → 常见系统路径依次查找
 //! 度量兼容的 Selawik 与 Noto Sans SC。
 
@@ -107,7 +112,7 @@ fn font_dirs() -> Vec<PathBuf> {
     v
 }
 
-/// 装载三档字重。每档 = 拉丁字体 + 中文回退；缺哪个就跳过，最后兜底 egui 内置字体。
+/// 装载三档字重。每档 = 拉丁字体 + 中文回退 + 各脚本回退；缺哪个就跳过，最后兜底 egui 内置字体。
 pub fn load_fonts(ctx: &egui::Context) {
     ctx.set_fonts(shared_fonts().clone());
 }
@@ -155,6 +160,45 @@ fn build_fonts()->FontDefinitions {
         find(&[("msyhbd.ttc", 1), ("NotoSansSC-Medium.otf", 0), ("NotoSansCJK-Medium.ttc", 2)], &dirs),
         find(&[("msyhbd.ttc", 1), ("NotoSansSC-Bold.otf", 0), ("NotoSansCJK-Bold.ttc", 2)], &dirs),
     ];
+    // 脚本回退链（每档字重独立）：微软雅黑不含下列字形，必须在 builtin 之前补齐。
+    // 每项按优先级排列，缺失的字体由 find() 返回 None 并自动跳过。
+    let jp = [
+        vec![
+            find(&[("YuGothM.ttc", 1)], &dirs), // Yu Gothic UI Regular
+            find(&[("YuGothR.ttc", 0)], &dirs),
+            find(&[("meiryo.ttc", 0)], &dirs),
+            find(&[("msgothic.ttc", 0)], &dirs),
+        ],
+        vec![
+            find(&[("YuGothB.ttc", 2)], &dirs), // Yu Gothic UI Semibold
+            find(&[("YuGothM.ttc", 0)], &dirs),
+            find(&[("YuGothR.ttc", 0)], &dirs),
+        ],
+        vec![
+            find(&[("YuGothB.ttc", 1)], &dirs), // Yu Gothic UI Bold
+            find(&[("YuGothB.ttc", 0)], &dirs),
+        ],
+    ];
+    let kr = [
+        vec![find(&[("malgun.ttf", 0)], &dirs)],
+        vec![find(&[("malgunbd.ttf", 0)], &dirs), find(&[("malgun.ttf", 0)], &dirs)],
+        vec![find(&[("malgunbd.ttf", 0)], &dirs), find(&[("malgun.ttf", 0)], &dirs)],
+    ];
+    let th = [
+        vec![find(&[("LeelawUI.ttf", 0)], &dirs)],
+        vec![find(&[("LeelaUIb.ttf", 0)], &dirs), find(&[("LeelawUI.ttf", 0)], &dirs)],
+        vec![find(&[("LeelaUIb.ttf", 0)], &dirs), find(&[("LeelawUI.ttf", 0)], &dirs)],
+    ];
+    let indic = [
+        vec![find(&[("Nirmala.ttc", 0)], &dirs)],
+        vec![find(&[("Nirmala.ttc", 1)], &dirs)],
+        vec![find(&[("Nirmala.ttc", 1)], &dirs)],
+    ];
+    let arab = [
+        vec![find(&[("tahoma.ttf", 0)], &dirs)],
+        vec![find(&[("tahomabd.ttf", 0)], &dirs), find(&[("tahoma.ttf", 0)], &dirs)],
+        vec![find(&[("tahomabd.ttf", 0)], &dirs), find(&[("tahoma.ttf", 0)], &dirs)],
+    ];
 
     let mut fonts = FontDefinitions::default();
     let mut cache: Vec<(PathBuf, u32, String)> = Vec::new();
@@ -184,6 +228,23 @@ fn build_fonts()->FontDefinitions {
         if let Some(k) = add(&mut fonts, &cjk[i], format!("cjk{i}")) {
             list.push(k);
         }
+        // 脚本回退（日文 → 韩文 → 泰文 → 印度系 → 阿拉伯/希伯来/越南语），
+        // 必须排在 builtin 之前：egui 内置字体不含这些脚本，提前兜底会把它当成缺字方框。
+        for (faces, prefix) in [
+            (&jp[i], "jp"),
+            (&kr[i], "kr"),
+            (&th[i], "th"),
+            (&indic[i], "indic"),
+            (&arab[i], "arab"),
+        ] {
+            for (n, face) in faces.iter().enumerate() {
+                // 首选项用 jp0/jp1/jp2，其余回退依次用 jp0_1、jp0_2…，保证 font_data key 唯一。
+                let key = if n == 0 { format!("{prefix}{i}") } else { format!("{prefix}{i}_{n}") };
+                if let Some(k) = add(&mut fonts, face, key) {
+                    list.push(k);
+                }
+            }
+        }
         list.extend(builtin.iter().cloned());
         fonts.families.insert(fam.clone(), list);
     }
@@ -201,6 +262,99 @@ pub fn app_icon()->std::sync::Arc<eframe::egui::IconData>{
 
 #[cfg(test)]
 mod tests {
+    use super::{find, font, font_dirs, load_fonts, shared_fonts, W};
+    use eframe::egui::{self, FontDefinitions, FontFamily};
+
+    /// 脚本回退字体是否存在（复用 build_fonts 的查找顺序，跨平台安全）。
+    fn script_available(cands: &[(&str, u32)]) -> bool {
+        find(cands, &font_dirs()).is_some()
+    }
+
+    /// 字体列表中 egui 内置字体段的起始下标。
+    fn builtin_start(list: &[String]) -> usize {
+        let defaults = FontDefinitions::default();
+        let default_list = &defaults.families[&FontFamily::Proportional];
+        list.iter().position(|k| default_list.contains(k)).unwrap_or(list.len())
+    }
+
+    #[test]
+    fn script_fallbacks_are_inserted_between_cjk_and_builtin() {
+        let fonts = shared_fonts();
+        let prop = &fonts.families[&FontFamily::Proportional];
+        assert!(
+            prop.len() >= FontDefinitions::default().families[&FontFamily::Proportional].len(),
+            "脚本回退不能挤掉 egui 内置字体"
+        );
+        let start = builtin_start(prop);
+        // 拉丁仍是首选，中文紧随其后；脚本回退全部在 egui 内置字体之前。
+        if fonts.font_data.contains_key("latin0") {
+            assert_eq!(prop.first().map(String::as_str), Some("latin0"), "拉丁字体必须排在首位");
+        }
+        if fonts.font_data.contains_key("cjk0") {
+            let pos = prop.iter().position(|k| k == "cjk0").expect("cjk0 必须出现在 Proportional 字体链中");
+            if fonts.font_data.contains_key("latin0") {
+                assert_eq!(pos, 1, "中文字体必须紧随拉丁字体");
+            }
+            assert!(pos < start, "中文字体必须在 egui 内置字体之前");
+        }
+        for (i, key) in prop.iter().enumerate() {
+            let is_script = ["jp", "kr", "th", "indic", "arab"].iter().any(|p| key.starts_with(p));
+            if is_script {
+                assert!(i < start, "脚本回退 {key} 排在了 egui 内置字体之后，缺字方框会重新出现");
+            }
+        }
+        // 系统字体存在时，常规档对应的回退 key 必须真实排在 builtin 之前。
+        let regular: [(&[(&str, u32)], &str); 4] = [
+            (&[("malgun.ttf", 0)], "kr0"),
+            (&[("LeelawUI.ttf", 0)], "th0"),
+            (&[("Nirmala.ttc", 0)], "indic0"),
+            (&[("tahoma.ttf", 0)], "arab0"),
+        ];
+        for (cands, key) in regular {
+            if !script_available(cands) {
+                continue;
+            }
+            let pos = prop.iter().position(|k| k == key).unwrap_or_else(|| panic!("缺少回退 key {key}"));
+            assert!(pos < start, "{key} 必须排在 egui 内置字体之前");
+        }
+        // 日文常规档优先级：YuGothM.ttc#1 → YuGothR.ttc#0 → meiryo.ttc#0 → msgothic.ttc#0。
+        let jp_regular: &[(&[(&str, u32)], &str)] = &[
+            (&[("YuGothM.ttc", 1)], "jp0"),
+            (&[("YuGothR.ttc", 0)], "jp0_1"),
+            (&[("meiryo.ttc", 0)], "jp0_2"),
+            (&[("msgothic.ttc", 0)], "jp0_3"),
+        ];
+        if let Some((_, key)) = jp_regular.iter().find(|(cands, _)| script_available(cands)) {
+            let pos = prop.iter().position(|k| k.as_str() == *key).unwrap_or_else(|| panic!("缺少日文回退 key {key}"));
+            assert!(pos < start, "{key} 必须排在 egui 内置字体之前");
+        }
+    }
+
+    #[test]
+    fn script_fallbacks_cover_non_latin_glyphs() {
+        let ctx = egui::Context::default();
+        load_fonts(&ctx);
+        // egui 在首帧排版时才真正创建字体实例。
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let semibold = font(11.0, W::Semibold);
+        // (候选字体, 样例文本, 说明)：本机缺字体时跳过，CI 未装语言包也不会失败。
+        let cases: &[(&[(&str, u32)], &str, &str)] = &[
+            (&[("malgun.ttf", 0)], "안녕하세요", "韩文"),
+            (&[("YuGothM.ttc", 1), ("YuGothR.ttc", 0), ("meiryo.ttc", 0), ("msgothic.ttc", 0)], "髙﨑邉", "日文生僻字"),
+            (&[("LeelawUI.ttf", 0)], "สวัสดี", "泰文"),
+            (&[("Nirmala.ttc", 0)], "नमस्ते", "印地文"),
+            (&[("tahoma.ttf", 0)], "مرحبا", "阿拉伯文"),
+            (&[("tahoma.ttf", 0)], "שלום", "希伯来文"),
+            (&[("tahoma.ttf", 0)], "Tiếng Việt", "越南语"),
+        ];
+        for (cands, sample, label) in cases {
+            if !script_available(cands) {
+                continue;
+            }
+            assert!(ctx.fonts(|f| f.has_glyphs(&semibold, sample)), "{label}样例 {sample:?} 仍然缺字");
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn mapped_fonts_prevent_in_place_writes_and_keep_shared_reads(){

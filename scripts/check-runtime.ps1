@@ -48,7 +48,9 @@ try {
             $dependencies += $name
         }
     }
-    $runtime = @($dependencies | Where-Object { $_ -match '^(vcruntime|msvcp|msvcr|api-ms-win-crt-).*\.dll$' })
+    # Windows 10/11 自带 UCRT（api-ms-win-crt-*、ucrtbase.dll）和系统 msvcrt.dll，
+    # 不把它们当成需要额外分发的运行库；仍需拒绝 VC++ 可再发行运行库（vcruntime/msvcp/msvcr100 等）。
+    $runtime = @($dependencies | Where-Object { $_ -match '^(vcruntime|msvcp|msvcr[0-9]|concrt).*\.dll$' })
     if ($runtime.Count) { throw ('发布程序仍依赖外部 C/C++ 运行库：' + ($runtime -join ', ')) }
     Write-Output '运行库检查通过：Windows x64，无外部 C/C++ 运行库依赖。'
 } finally { $reader.Dispose(); $stream.Dispose() }

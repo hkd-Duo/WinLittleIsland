@@ -5,6 +5,9 @@ use crate::paint::{Card, H};
 use crate::theme::{self, size, W};
 use eframe::egui::{self, Color32, Rect};
 
+/// 关于页直接展示的项目地址：源码、版本更新与问题反馈都从这里进入。
+const GITHUB_HOME: &str = "https://github.com/hkd-Duo/Daozai";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AlertSource { Internal, External(String) }
 
@@ -18,6 +21,8 @@ pub(crate) struct Alert {
     pub duration: f64,
     pub bluetooth: Option<(crate::bt::DeviceKind, bool)>,
     pub meeting: Option<(crate::mail::Meeting, String)>,
+    /// 外部应用通知的图标；内部提醒为 None。
+    pub icon: Option<std::sync::Arc<egui::ColorImage>>,
 }
 impl Alert {
     pub(crate) fn is_hud(&self)->bool {self.source==AlertSource::Internal && matches!(self.title.as_str(),"系统音量"|"大写锁定"|"键盘输入语言"|"网络连接"|"电源已连接"|"已切换电池供电"|"蓝牙设备")}
@@ -182,6 +187,7 @@ impl App {
             duration: if transient { 2.5 } else { 8.0 },
             bluetooth: None,
             meeting: None,
+            icon: None,
         };
         self.enqueue_alert(a, system);
     }
@@ -189,7 +195,7 @@ impl App {
         self.enqueue_alert(Alert {
             source: AlertSource::Internal,
             title: "会议提醒".into(), body: format!("{} · {} · {}", meeting.title, meeting.at, source),
-            page, at: self.t, duration: 12.0, bluetooth: None, meeting: Some((meeting, source)),
+            page, at: self.t, duration: 12.0, bluetooth: None, meeting: Some((meeting, source)), icon: None,
         }, true);
     }
     pub(crate) fn bluetooth_alert(&mut self, device: &crate::bt::Device, connected: bool) {
@@ -205,6 +211,7 @@ impl App {
             page: 5, at: self.t, duration: 2.5,
             bluetooth: Some((device.kind, connected)),
             meeting: None,
+            icon: None,
         };
         self.enqueue_alert(a, false);
     }
@@ -233,6 +240,10 @@ impl App {
         }
     }
     pub fn receive_notification(&mut self, app:String, id:String, body:String){
+        self.receive_notification_with_icon(app,id,body,None);
+    }
+    /// Windows 通知会附带来源应用图标；解码失败时退回只显示应用名。
+    pub fn receive_notification_with_icon(&mut self, app:String, id:String, body:String, icon:Option<(u32,u32,Vec<u8>)>){
         if !self.settings.read_notifications || id.is_empty(){return;}
         if self.history.iter().any(|a|format!("{} · {}",a.title,a.body)==body){return;}
         if !self.notification_apps.observe(&id,&app) || !self.settings.notifications{return;}
@@ -242,9 +253,13 @@ impl App {
         let body=if self.settings.notification_preview {
             let mut text=body.chars().filter(|c|!c.is_control()).take(300).collect::<String>();
             if let Some(code)=crate::otp::extract("",&text,&[]) {text=crate::mail_privacy::mask(&text,&code.text);}
-            text
+            if text.trim().is_empty(){"收到一条通知".into()}else{text}
         }else{"收到新通知 · 内容已隐藏".into()};
-        self.enqueue_alert(Alert{source:AlertSource::External(id),title,body,page:usize::MAX,at:self.t,duration:4.5,bluetooth:None,meeting:None},false);
+        let icon=icon.and_then(|(w,h,rgba)| {
+            (w>0 && h>0 && rgba.len()==(w as usize*h as usize*4))
+                .then(|| std::sync::Arc::new(egui::ColorImage::from_rgba_unmultiplied([w as usize,h as usize],&rgba)))
+        });
+        self.enqueue_alert(Alert{source:AlertSource::External(id),title,body,page:usize::MAX,at:self.t,duration:4.5,bluetooth:None,meeting:None,icon},false);
     }
     pub(crate) fn tick_alerts(&mut self) {
         let allowed=|a:&Alert|match &a.source {
@@ -274,12 +289,27 @@ impl App {
         }
     }
     pub(crate) fn draw_notice(&mut self, c:&Card,panel:Rect,a:&Alert,_cmds:&mut Vec<Cmd>){
-        let nc=c.clipped(0.0,0.0,panel.width(),panel.height());
+        let local=panel.size()/c.s;
+        let nc=c.clipped(0.0,0.0,local.x,local.y);
         if matches!(a.source,AlertSource::External(_)) {
             crate::paint::bell(&nc,310.0,22.0,theme::GRAY,crate::paint::bell_swing(self.t-a.at));
             nc.circle(314.0,17.5,2.0,Color32::from_rgb(255,72,72));
-            nc.centered_text(16.0,14.0,&nc.fit(&a.title,11.0,W::Semibold,198.0),11.0,W::Semibold,theme::WHITE,H::Left);
-            nc.centered_text(16.0,30.0,&nc.fit(&a.body,10.5,W::Regular,198.0),10.5,W::Regular,theme::GRAY,H::Left);
+            // 有来源应用图标时放左侧；没有则维持纯文字布局。
+            let(mut text_x,mut text_w)=(16.0,198.0);
+            if let Some(image)=&a.icon {
+                if !self.notice_icon.as_ref().is_some_and(|(old,_)|std::sync::Arc::ptr_eq(old,image)) {
+                    let texture=nc.ui.ctx().load_texture("notice-app-icon",(**image).clone(),egui::TextureOptions::LINEAR);
+                    self.notice_icon=Some((image.clone(),texture));
+                }
+                if let Some((_,texture))=&self.notice_icon {
+                    let rect=nc.rect(15.0,8.0,28.0,28.0);
+                    let uv=Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0));
+                    nc.painter.add(egui::epaint::RectShape::filled(rect,6.0*nc.s,Color32::WHITE).with_texture(texture.id(),uv));
+                    text_x=52.0; text_w=160.0;
+                }
+            }
+            nc.centered_text(text_x,14.0,&nc.fit(&a.title,11.0,W::Semibold,text_w),11.0,W::Semibold,theme::WHITE,H::Left);
+            nc.centered_text(text_x,30.0,&nc.fit(&a.body,10.5,W::Regular,text_w),10.5,W::Regular,theme::GRAY,H::Left);
             if notice_button(&nc,226.0,12.0,60.0,"关闭","external-dismiss"){
                 self.notice=None;
                 self.notification_bell_until=0.0;
@@ -627,10 +657,10 @@ impl App {
             if reminder_only{if let Some(d)=self.task_dialog.as_mut(){d.picker.show();}}else{self.save_task_editor();}
         }
     }
-    pub(crate) fn task_editor_inputs(&mut self,ui:&mut egui::Ui,origin:egui::Pos2,cmds:&mut Vec<Cmd>){
+    pub(crate) fn task_editor_inputs(&mut self,ui:&mut egui::Ui,origin:egui::Pos2,s:f32,cmds:&mut Vec<Cmd>){
         let Some(d)=self.task_dialog.as_mut() else{return};
         if d.reminder_only || d.picker.open{return;}
-        let name=ui.put(Rect::from_min_size(origin+egui::vec2(97.0,35.0),egui::vec2(260.0,17.0)),egui::TextEdit::singleline(&mut d.text).vertical_align(egui::Align::Center).id(egui::Id::new("task-name-edit")).frame(false).font(theme::font(11.5,W::Regular)));
+        let name=ui.put(Rect::from_min_size(origin+egui::vec2(97.0,35.0)*s,egui::vec2(260.0,17.0)*s),egui::TextEdit::singleline(&mut d.text).vertical_align(egui::Align::Center).id(egui::Id::new("task-name-edit")).frame(false).font(theme::font(11.5*s,W::Regular)));
         let first_focus=!d.focused;
         if first_focus{name.request_focus();d.focused=true;cmds.push(Cmd::Focus);}
         // 新建内容与下一步共用这一帧，避免同一次回车又提交了空提醒。
@@ -745,58 +775,6 @@ pub(crate) fn settings_label(ui:&mut egui::Ui,text:&str){
     ui.add_space(9.0);
     ui.label(egui::RichText::new(text).size(11.5).color(settings_color(ctx,Color32::from_gray(185),Color32::from_gray(70))));
     ui.add_space(2.0);
-}
-fn support_author(ui:&mut egui::Ui){
-    let id=egui::Id::new("support-author-open");
-    let open=ui.ctx().data(|data|data.get_temp::<bool>(id).unwrap_or(false));
-    let dark=ui.visuals().dark_mode;
-    let accent=if dark{Color32::from_rgb(182,163,245)}else{Color32::from_rgb(105,77,163)};
-    ui.scope(|ui|{
-    ui.set_min_height(225.0);
-    if !open {
-    egui::Frame::new().fill(if dark{Color32::from_rgb(42,37,53)}else{Color32::from_rgb(239,233,250)})
-        .corner_radius(10.0).show(ui,|ui|{
-            ui.set_min_width(ui.available_width());
-            ui.vertical_centered(|ui|{
-                ui.add(egui::Image::new(egui::include_image!("../assets/support/daozai-coffee.svg")).fit_to_exact_size(egui::vec2(211.0,110.0)));
-            });
-        });
-    ui.add_space(9.0);
-    ui.label(egui::RichText::new("小唐维护 · 岛仔陪伴").size(10.5).color(accent));
-    ui.label(egui::RichText::new("请小唐喝杯咖啡").size(19.0).strong());
-    ui.label("岛仔陪你认真生活，\n你的支持，陪小唐把它慢慢做好。");
-    } else {
-        let ctx=ui.ctx().clone();
-        ui.columns(2,|columns|{
-            for (i,(name,bytes,crop,color)) in [
-                ("微信支付",include_bytes!("../assets/support/support-wechat-original.jpg").as_slice(),[330.0,370.0,600.0],Color32::from_rgb(5,160,80)),
-                ("支付宝",include_bytes!("../assets/support/support-alipay-original.jpg").as_slice(),[200.0,660.0,860.0],Color32::from_rgb(22,120,255)),
-            ].into_iter().enumerate(){
-                let texture_id=egui::Id::new(("support-author-qr",i));
-                let texture=ctx.data_mut(|data|data.get_temp::<egui::TextureHandle>(texture_id)).unwrap_or_else(||{
-                    let image=image::load_from_memory(bytes).expect("内置收款码图片有效").to_rgba8();
-                    let texture=ctx.load_texture(name,egui::ColorImage::from_rgba_unmultiplied([image.width() as usize,image.height() as usize],image.as_raw()),egui::TextureOptions::LINEAR);
-                    ctx.data_mut(|data|data.insert_temp(texture_id,texture.clone()));texture
-                });
-                let size=texture.size_vec2();
-                let uv=egui::Rect::from_min_max(egui::pos2(crop[0]/size.x,crop[1]/size.y),egui::pos2((crop[0]+crop[2])/size.x,(crop[1]+crop[2])/size.y));
-                columns[i].vertical_centered(|ui|{
-                    ui.label(egui::RichText::new(name).color(color).strong());
-                    let side=ui.available_width().min(180.0);
-                    ui.add(egui::Image::new((texture.id(),egui::vec2(side,side))).uv(uv));
-                    ui.label(egui::RichText::new(if i==0{"打开微信扫一扫"}else{"打开支付宝扫一扫"}).size(11.0));
-                });
-            }
-        });
-    }
-    });
-    let button=egui::Button::new(egui::RichText::new(if open{"返回"}else{"请喝咖啡 · 支持作者"}).color(Color32::from_rgb(33,27,51)))
-        .fill(Color32::from_rgb(182,163,245)).corner_radius(8.0);
-    if ui.add_sized([ui.available_width(),32.0],button).clicked(){
-        ui.ctx().data_mut(|data|data.insert_temp(id,!open));
-    }
-    ui.add_space(7.0);
-    ui.label(egui::RichText::new("完全自愿 · 感谢每一份支持 · 不影响功能使用").size(11.0).color(ui.visuals().weak_text_color()));
 }
 pub(crate) fn settings_control_row(ui:&mut egui::Ui,title:&str,label_width:f32,controls:impl FnOnce(&mut egui::Ui)->egui::Response)->egui::Response{
     ui.horizontal(|ui|{
@@ -1037,6 +1015,32 @@ impl App {
                         });
                         settings_label(ui,"岛体显示");
                         settings_card(ui,|ui|{
+                            // 岛体大小：滑杆调整后立即作用于岛体、命中区与窗口裁剪区。
+                            settings_control_row(ui,"岛体大小",56.0,|ui|{
+                                let mut scale=self.settings.island_scale;
+                                let slider=ui.add(
+                                    egui::Slider::new(&mut scale,80..=140)
+                                        .step_by(5.0)
+                                        .suffix(" %")
+                                        .fixed_decimals(0),
+                                );
+                                if slider.changed(){self.settings.island_scale=scale.clamp(80,140);}
+                                slider
+                            });
+                            ui.label(egui::RichText::new("100% 为默认大小；调整后立即生效，设置窗口不受影响。").size(11.0).color(ui.visuals().weak_text_color()));
+                            settings_control_row(ui,"收起时大小",56.0,|ui|{
+                                let mut scale=self.settings.collapsed_scale;
+                                let slider=ui.add(
+                                    egui::Slider::new(&mut scale,80..=200)
+                                        .step_by(5.0)
+                                        .suffix(" %")
+                                        .fixed_decimals(0),
+                                );
+                                if slider.changed(){self.settings.collapsed_scale=scale.clamp(80,200);}
+                                slider
+                            });
+                            ui.label(egui::RichText::new("只放大收起后的药丸/歌词条，展开面板仍使用上面的岛体大小；大屏看不清最小化状态时可调大。").size(11.0).color(ui.visuals().weak_text_color()));
+                            ui.separator();
                             let selected=self.displays.iter().find(|d|d.id==self.settings.display_id);
                             let label=if self.settings.display_id.is_empty(){"跟随主屏"}else{selected.map_or("所选屏幕未连接",|d|d.label.as_str())};
                             settings_control_row(ui,"显示屏",56.0,|ui|{
@@ -1159,7 +1163,7 @@ impl App {
                             ui.label(egui::RichText::new("新通知在岛上显示约 4.5 秒；默认只显示应用名，不保存通知正文。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             ui.separator();
                             setting_row(ui,"显示通知正文","可能包含私密消息；屏幕共享时建议关闭",&mut self.settings.notification_preview);
-                            ui.label(egui::RichText::new("收到通知的应用会出现在这里，可分别开启或关闭。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
+                            ui.label(egui::RichText::new("所有应用（包括 Windows 自身）的 Toast 通知默认都会上岛；这里只列出收到过通知的应用，可单独关闭。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             let before_apps=self.notification_apps.items.clone();
                             for (_,name,enabled) in &mut self.notification_apps.items {setting_row(ui,name,"",enabled);}
                             if before_apps!=self.notification_apps.items{self.notification_apps.save();}
@@ -1423,8 +1427,16 @@ impl App {
                                 ui.hyperlink_to("CC BY 4.0", "https://creativecommons.org/licenses/by/4.0/");
                             });
                         });
-                        settings_label(ui,"支持作者");
-                        settings_card(ui,support_author);
+                        settings_label(ui,"GitHub");
+                        settings_card(ui,|ui|{
+                            ui.label(egui::RichText::new("岛仔在 GitHub 开源，源码、版本更新和问题反馈都在这里。").size(12.5));
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui|{
+                                if ui.add_sized([118.0,32.0],egui::Button::new("打开 GitHub")).clicked(){self.pending.push(Cmd::OpenUrl(GITHUB_HOME.into()));}
+                                ui.hyperlink_to(egui::RichText::new("github.com/hkd-Duo/Daozai").size(12.0)
+                                    .color(settings_color(ctx,Color32::from_rgb(120,185,245),Color32::from_rgb(26,100,177))),GITHUB_HOME);
+                            });
+                        });
                     }
                     }
                 });

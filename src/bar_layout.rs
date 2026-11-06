@@ -33,9 +33,31 @@ pub(crate) fn animations_enabled()->bool {
 pub(crate) struct Layout {
     pub width: f32,
     pub x: [Option<f32>; 10],
+    /// 额度组件的半宽；胶囊比圆环宽，重新排序时按实际宽度避让。
+    pub quota_half: [f32; 3],
 }
 
 impl Layout {
+    /// 1–2 个独立胶囊的布局；left/right 分别排在时钟两侧，可各自独立放置。
+    pub fn capsules(battery:bool,left:&[f32],right:&[f32],music:bool,focus:bool,bell:bool,pet:bool)->Self {
+        fn place(cursor:&mut f32,width:f32)->f32 {let x=*cursor+width/2.0;*cursor+=width+12.0;x}
+        let mut x=[None;10];let mut cursor=16.0;let mut quota_half=[13.5;3];let mut slot=0;
+        if battery {x[BATTERY]=Some(place(&mut cursor,WIDTHS[BATTERY]));}
+        if pet {x[PET]=Some(place(&mut cursor,WIDTHS[PET]));}
+        for width in left.iter().take(2).copied(){
+            x[QUOTA+slot]=Some(place(&mut cursor,width));quota_half[slot]=width/2.0;slot+=1;
+        }
+        x[CLOCK]=Some(place(&mut cursor,WIDTHS[CLOCK]));
+        for width in right.iter().take(2-slot.min(2)).copied(){
+            x[QUOTA+slot]=Some(place(&mut cursor,width));quota_half[slot]=width/2.0;slot+=1;
+        }
+        for (slot,on) in [(MUSIC,music&&!bell),(FOCUS,focus),(BELL,bell)] {
+            if on {x[slot]=Some(place(&mut cursor,WIDTHS[slot]));}
+        }
+        let width=cursor-12.0+16.0;
+        for value in x.iter_mut().flatten() {*value-=width/2.0;}
+        Self {width:width.max(96.0),x,quota_half}
+    }
     pub fn new(battery:bool,quotas:usize,music:bool,focus:bool,bell:bool,pet:bool)->Self {
         fn place(cursor:&mut f32,width:f32)->f32 {let x=*cursor+width/2.0;*cursor+=width+12.0;x}
         let mut x=[None;10];let mut cursor=16.0;
@@ -62,7 +84,7 @@ impl Layout {
         }
         let width=cursor-12.0+16.0;
         for value in x.iter_mut().flatten() {*value-=width/2.0;}
-        Self {width:width.max(96.0),x}
+        Self {width:width.max(96.0),x,quota_half:[13.5;3]}
     }
     pub fn widen_clock(&mut self, extra:f32) {
         let clock=self.x[CLOCK].unwrap();
@@ -76,8 +98,9 @@ impl Layout {
         let original=self.x;let mut cursor=-self.width/2.0+16.0;
         for slot in order.iter().copied().chain(std::iter::once(BELL)) {
             let slots:Vec<usize>=if slot==QUOTA{(QUOTA..=MORE).collect()}else{vec![slot]};
-            let left=slots.iter().filter_map(|&i|original[i].map(|x|x-WIDTHS[i]/2.0)).fold(f32::INFINITY,f32::min);
-            let right=slots.iter().filter_map(|&i|original[i].map(|x|x+WIDTHS[i]/2.0)).fold(f32::NEG_INFINITY,f32::max);
+            let half=|i:usize|if i==MORE{WIDTHS[MORE]/2.0}else if (QUOTA..QUOTA+3).contains(&i){self.quota_half[i-QUOTA]}else{WIDTHS[i]/2.0};
+            let left=slots.iter().filter_map(|&i|original[i].map(|x|x-half(i))).fold(f32::INFINITY,f32::min);
+            let right=slots.iter().filter_map(|&i|original[i].map(|x|x+half(i))).fold(f32::NEG_INFINITY,f32::max);
             if !left.is_finite(){continue;}
             for i in slots {if let Some(x)=original[i]{self.x[i]=Some(cursor+x-left);}}
             cursor+=right-left+12.0;

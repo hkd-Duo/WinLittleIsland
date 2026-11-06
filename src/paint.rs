@@ -64,6 +64,11 @@ impl<'a> Card<'a> {
         c.live = false;
         c
     }
+    /// 整体缩放画布（岛体大小设置）；局部坐标保持不变。
+    pub fn with_scale(mut self, scale: f32) -> Self {
+        self.s = scale;
+        self
+    }
     pub fn clipped(&self, x: f32, y: f32, w: f32, h: f32) -> Self {
         let mut c = self.clone();
         let r = self.rect(x, y, w, h).intersect(self.painter.clip_rect());

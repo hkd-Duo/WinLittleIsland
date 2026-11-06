@@ -1,7 +1,9 @@
 //! Windows 状态采样与经用户授权的通知读取。
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver};
-use windows::core::{Result, HSTRING, PWSTR};
+use windows::core::{Result, HSTRING, PCWSTR, PWSTR};
+use windows::Foundation::Size;
+use windows::Storage::Streams::DataReader;
 use windows::Win32::Foundation::{CloseHandle, HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
@@ -19,7 +21,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::UI::Notifications::Management::{
     UserNotificationListener, UserNotificationListenerAccessStatus,
 };
-use windows::UI::Notifications::{NotificationKinds, UserNotification};
+use windows::UI::Notifications::{NotificationBinding, NotificationKinds, NotificationVisual, UserNotification};
 
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Snapshot {
@@ -222,9 +224,11 @@ pub(crate) fn is_browser_process(name:&str)->bool {
         .iter().any(|browser|name.eq_ignore_ascii_case(browser))
 }
 
+/// 岛在透明画布左侧，画布宽为 CANVAS_W 逻辑点；窗口物理宽度随岛体大小一起缩放，
+/// 所以 ppp（含岛体缩放）= 窗口宽度 / CANVAS_W，岛中心固定在窗口左侧 WIN_W/2 处。
 fn browser_overlaps_island(browser:RECT,island:RECT)->bool {
-    let scale=(island.right-island.left) as f32/crate::app::WIN_W;
-    let center=(island.left+island.right) as f32/2.0;
+    let scale=(island.right-island.left) as f32/crate::app::CANVAS_W;
+    let center=island.left as f32+crate::app::WIN_W*scale/2.0;
     let half=crate::app::PW*scale/2.0;
     (browser.left as f32)<center+half && (browser.right as f32)>center-half
         && (browser.top as f32)<island.top as f32+crate::app::BAR_H*scale && browser.bottom>island.top
@@ -254,31 +258,217 @@ pub fn browser_at_top(island:HWND,settings:&crate::model::Settings)->Option<bool
 pub enum Incoming {
     Revoked,
     Status(String),
-    Message(String, String, String),
+    Message(String, String, String, Option<(u32, u32, Vec<u8>)>),
 }
-fn notification_text(n: &UserNotification) -> Result<(String, String, String)> {
+/// 通知来源常以快捷方式文件名出现（例如 "PowerShell 7 (x64).lnk"），去掉后缀并兜底。
+fn clean_app_name(display: &str) -> String {
+    let trimmed = display.trim();
+    let trimmed = trimmed.strip_suffix(".lnk").unwrap_or(trimmed).trim();
+    if trimmed.is_empty() {
+        "Windows 通知".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// 新式 Toast 用 ToastGeneric；旧式应用仍可能使用 ToastText/ToastImageAndText 模板。
+fn notification_binding(visual: &NotificationVisual) -> Option<NotificationBinding> {
+    const CANDIDATES: &[&str] = &[
+        "ToastGeneric",
+        "ToastText01",
+        "ToastText02",
+        "ToastText03",
+        "ToastText04",
+        "ToastImageAndText01",
+        "ToastImageAndText02",
+        "ToastImageAndText03",
+        "ToastImageAndText04",
+    ];
+    CANDIDATES
+        .iter()
+        .find_map(|name| visual.GetBinding(&HSTRING::from(*name)).ok())
+}
+
+fn notification_text(n: &UserNotification) -> Option<String> {
+    let binding = notification_binding(&n.Notification().ok()?.Visual().ok()?)?;
+    let texts = binding.GetTextElements().ok()?;
+    let mut parts = vec![];
+    for i in 0..texts.Size().ok()? {
+        let text = texts.GetAt(i).ok()?.Text().ok()?.to_string();
+        if !text.trim().is_empty() {
+            parts.push(text);
+        }
+    }
+    Some(parts.join(" · "))
+}
+
+/// 优先读取封装应用自带的 Logo；Win32 应用通常返回空，再用 Shell 的 AppsFolder 图标兜底。
+fn appinfo_logo_rgba(n: &UserNotification) -> Option<(u32, u32, Vec<u8>)> {
+    let info = n.AppInfo().ok()?.DisplayInfo().ok()?;
+    let logo = info
+        .GetLogo(Size {
+            Width: 48.0,
+            Height: 48.0,
+        })
+        .ok()?;
+    let stream = logo.OpenReadAsync().ok()?.get().ok()?;
+    let size = stream.Size().ok()?;
+    if size == 0 || size > 512 * 1024 {
+        return None;
+    }
+    let input = stream.GetInputStreamAt(0).ok()?;
+    let reader = DataReader::CreateDataReader(&input).ok()?;
+    reader.LoadAsync(size as u32).ok()?.get().ok()?;
+    let mut bytes = vec![0u8; size as usize];
+    reader.ReadBytes(&mut bytes).ok()?;
+    let image = image::load_from_memory(&bytes).ok()?.to_rgba8();
+    Some((image.width(), image.height(), image.into_raw()))
+}
+
+/// 把 HICON 通过一个 32bpp DIB 转成直通 RGBA；没有 alpha 的旧图标再用 AND mask 还原透明度。
+unsafe fn hicon_to_rgba(hicon: windows::Win32::UI::WindowsAndMessaging::HICON) -> Option<(u32, u32, Vec<u8>)> {
+    use std::mem::size_of;
+    use windows::Win32::Graphics::Gdi::{
+        BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CreateCompatibleDC, CreateDIBSection,
+        DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDIBits, GetObjectW, HGDIOBJ, SelectObject,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{DI_NORMAL, DrawIconEx, GetIconInfo, ICONINFO};
+    let mut info = ICONINFO::default();
+    GetIconInfo(hicon, &mut info).ok()?;
+    let result = (|| -> Option<(u32, u32, Vec<u8>)> {
+        let mut bitmap = BITMAP::default();
+        if GetObjectW(
+            HGDIOBJ(info.hbmColor.0),
+            size_of::<BITMAP>() as i32,
+            Some(&mut bitmap as *mut _ as *mut core::ffi::c_void),
+        ) == 0
+        {
+            return None;
+        }
+        let (w, h) = (bitmap.bmWidth, bitmap.bmHeight);
+        if w <= 0 || h <= 0 || w > 256 || h > 256 {
+            return None;
+        }
+        let hdc = CreateCompatibleDC(None);
+        if hdc.0.is_null() {
+            return None;
+        }
+        let mut bi = BITMAPINFO::default();
+        bi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
+        bi.bmiHeader.biWidth = w;
+        bi.bmiHeader.biHeight = -h;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB.0;
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let dib = CreateDIBSection(hdc, &bi, DIB_RGB_COLORS, &mut bits, None, 0);
+        let Ok(dib) = dib else {
+            let _ = DeleteDC(hdc);
+            return None;
+        };
+        let old = SelectObject(hdc, HGDIOBJ(dib.0));
+        let drawn = DrawIconEx(hdc, 0, 0, hicon, w, h, 0, None, DI_NORMAL);
+        SelectObject(hdc, old);
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        if drawn.is_ok() && !bits.is_null() {
+            let data = std::slice::from_raw_parts(bits as *const u8, (w * h * 4) as usize);
+            let mut any_alpha = false;
+            for px in data.chunks_exact(4) {
+                if px[3] > 0 {
+                    any_alpha = true;
+                }
+                rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+            }
+            if !any_alpha {
+                let stride = (((w + 31) / 32) * 4) as usize;
+                let mut mask = vec![0u8; stride * h as usize];
+                let mut mi = BITMAPINFO::default();
+                mi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
+                mi.bmiHeader.biWidth = w;
+                mi.bmiHeader.biHeight = -h;
+                mi.bmiHeader.biPlanes = 1;
+                mi.bmiHeader.biBitCount = 1;
+                mi.bmiHeader.biCompression = BI_RGB.0;
+                let hdc2 = CreateCompatibleDC(None);
+                if !hdc2.0.is_null() {
+                    if GetDIBits(hdc2, info.hbmMask, 0, h as u32, Some(mask.as_mut_ptr() as *mut core::ffi::c_void), &mut mi, DIB_RGB_COLORS) > 0 {
+                        for y in 0..h as usize {
+                            for x in 0..w as usize {
+                                let transparent = (mask[y * stride + x / 8] >> (7 - (x % 8))) & 1 == 1;
+                                rgba[(y * w as usize + x) * 4 + 3] = if transparent { 0 } else { 255 };
+                            }
+                        }
+                    }
+                    let _ = DeleteDC(hdc2);
+                }
+            }
+        }
+        let _ = DeleteObject(HGDIOBJ(dib.0));
+        let _ = DeleteDC(hdc);
+        (rgba.len() == (w * h * 4) as usize).then_some((w as u32, h as u32, rgba))
+    })();
+    if !info.hbmColor.0.is_null() {
+        let _ = DeleteObject(HGDIOBJ(info.hbmColor.0));
+    }
+    if !info.hbmMask.0.is_null() {
+        let _ = DeleteObject(HGDIOBJ(info.hbmMask.0));
+    }
+    result
+}
+
+fn shell_app_icon_rgba(aumid: &str) -> Option<(u32, u32, Vec<u8>)> {
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::Common::ITEMIDLIST;
+    use windows::Win32::UI::Shell::{
+        SHGetFileInfoW, SHParseDisplayName, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_PIDL,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::DestroyIcon;
+    unsafe {
+        let path = format!("shell:AppsFolder\\{aumid}");
+        let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+        let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
+        SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut pidl, 0, None).ok()?;
+        let mut file = SHFILEINFOW::default();
+        let flags = SHGFI_PIDL | SHGFI_ICON | SHGFI_LARGEICON;
+        let got = SHGetFileInfoW(
+            PCWSTR(pidl as *const u16),
+            FILE_ATTRIBUTE_NORMAL,
+            Some(&mut file),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            flags,
+        );
+        CoTaskMemFree(Some(pidl as *const core::ffi::c_void));
+        if got == 0 || file.hIcon.0.is_null() {
+            return None;
+        }
+        let icon = file.hIcon;
+        let rgba = hicon_to_rgba(icon);
+        let _ = DestroyIcon(icon);
+        rgba
+    }
+}
+
+/// 读取通知来源应用的小图标；读取失败不影响通知本身。
+fn notification_icon(n: &UserNotification, aumid: &str) -> Option<(u32, u32, Vec<u8>)> {
+    appinfo_logo_rgba(n).or_else(|| shell_app_icon_rgba(aumid))
+}
+
+/// 返回（应用名、AppUserModelId、正文）；无文字的通知也会返回空正文，交给界面显示通用提示。
+fn notification_content(n: &UserNotification) -> (String, String, String) {
     let app = n
         .AppInfo()
         .and_then(|a| a.DisplayInfo())
         .and_then(|d| d.DisplayName())
+        .map(|s| clean_app_name(&s.to_string()))
+        .unwrap_or_else(|_| "Windows 通知".to_string());
+    let id = n
+        .AppInfo()
+        .and_then(|a| a.AppUserModelId())
         .map(|s| s.to_string())
-        .unwrap_or_default();
-    let app = if app.trim().is_empty() {
-        "Windows 通知".to_string()
-    } else {
-        app
-    };
-    let id=n.AppInfo().and_then(|a|a.AppUserModelId()).map(|s|s.to_string()).unwrap_or_else(|_|app.clone());
-    let binding = n
-        .Notification()?
-        .Visual()?
-        .GetBinding(&HSTRING::from("ToastGeneric"))?;
-    let texts = binding.GetTextElements()?;
-    let mut parts = vec![];
-    for i in 0..texts.Size()? {
-        parts.push(texts.GetAt(i)?.Text()?.to_string());
-    }
-    Ok((app, id, parts.join(" · ")))
+        .unwrap_or_else(|_| app.clone());
+    let body = notification_text(n).unwrap_or_default();
+    (app, id, body)
 }
 /// 必须由窗口线程发起权限请求，后台线程仅等待并读取新增通知。
 pub fn connect() -> Result<Receiver<Incoming>> {
@@ -300,7 +490,9 @@ pub fn connect() -> Result<Receiver<Incoming>> {
                 return Ok(());
             }
             let listener = UserNotificationListener::Current()?;
-            let mut seen = HashSet::new();
+            // 通知 Id 只在一个应用内唯一，必须带上 AppUserModelId；同时记录正文，
+            // 这样同一会话/同一条通知更新内容时也能再次上岛。
+            let mut seen: HashMap<(u32, String), (String, String)> = HashMap::new();
             let mut first = true;
             loop {
                 if listener.GetAccessStatus()? != UserNotificationListenerAccessStatus::Allowed {
@@ -311,20 +503,21 @@ pub fn connect() -> Result<Receiver<Incoming>> {
                 let items = listener
                     .GetNotificationsAsync(NotificationKinds::Toast)?
                     .get()?;
-                let mut current = HashSet::new();
+                let mut current: HashSet<(u32, String)> = HashSet::new();
                 for i in 0..items.Size()? {
                     let n = items.GetAt(i)?;
                     let id = n.Id()?;
-                    current.insert(id);
-                    if !first && !seen.contains(&id) {
-                        if let Ok((app, id, body)) = notification_text(&n) {
-                            if !body.is_empty() {
-                                if tx.send(Incoming::Message(app, id, body)).is_err() {
-                                    return Ok(());
-                                }
-                            }
+                    let (app, app_id, body) = notification_content(&n);
+                    let key = (id, app_id.clone());
+                    let value = (app.clone(), body.clone());
+                    current.insert(key.clone());
+                    if !first && seen.get(&key) != Some(&value) {
+                        let icon = notification_icon(&n, &app_id);
+                        if tx.send(Incoming::Message(app, app_id, body, icon)).is_err() {
+                            return Ok(());
                         }
                     }
+                    seen.insert(key, value);
                 }
                 if first {
                     let _ = tx.send(Incoming::Status(format!(
@@ -333,7 +526,7 @@ pub fn connect() -> Result<Receiver<Incoming>> {
                     )));
                     first = false;
                 }
-                seen = current;
+                seen.retain(|key, _| current.contains(key));
                 std::thread::sleep(std::time::Duration::from_secs(2));
                 if tx
                     .send(Incoming::Status(format!(
@@ -425,6 +618,14 @@ pub fn drag_file(path: &std::path::Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn notification_app_names_hide_shortcut_suffix_and_fallback() {
+        assert_eq!(clean_app_name("PowerShell 7 (x64).lnk"), "PowerShell 7 (x64)");
+        assert_eq!(clean_app_name("  微信.lnk "), "微信");
+        assert_eq!(clean_app_name("  "), "Windows 通知");
+        assert_eq!(clean_app_name("Windows Shell Experience 主机"), "Windows Shell Experience 主机");
+    }
+
     #[test]
     fn browser_minimal_recognizes_browsers_without_matching_electron_apps(){
         for name in ["chrome.exe","MSEDGE.EXE","firefox.exe","brave.exe","zen.exe","QQBrowser.exe","quark.exe","Quark.exe","QUARK.EXE"] {

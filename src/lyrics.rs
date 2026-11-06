@@ -10,6 +10,8 @@ pub struct LyricsLine {
 pub struct Lyrics {
     pub lines: Vec<LyricsLine>,
     pub synced: bool,
+    /// 与原文同样带时间戳的翻译行；没有翻译时为空。
+    pub translations: Vec<LyricsLine>,
 }
 
 #[derive(Clone,Debug,PartialEq,Eq)]
@@ -34,6 +36,22 @@ impl Lyrics {
     /// 返回当前时间点应显示的行号。
     pub fn index_at(&self, secs: f32) -> Option<usize> {
         self.lines.iter().rposition(|line|line.t<=secs)
+    }
+    /// 先按相同时间匹配，再允许 1.5 秒以内的时间偏移；纯文本翻译才退回行号。
+    pub fn translation_for(&self, index: usize) -> Option<&str> {
+        let line=self.lines.get(index)?;
+        if let Some(t)=self.translations.get(index) {
+            let text=t.text.trim();
+            if !text.is_empty() && (t.t-line.t).abs()<=1.5 { return Some(text); }
+        }
+        if let Some(t)=self.translations.iter()
+            .filter(|t|!t.text.trim().is_empty() && (t.t-line.t).abs()<=1.5)
+            .min_by(|a,b|(a.t-line.t).abs().total_cmp(&(b.t-line.t).abs()))
+        { return Some(t.text.trim()); }
+        // 没有时间戳的纯文本翻译无法做时间对齐，只在行数一致时按行号对应。
+        (self.translations.iter().all(|t|t.t==0.0) && self.translations.len()==self.lines.len())
+            .then(||self.translations[index].text.trim())
+            .filter(|text|!text.is_empty())
     }
 }
 
@@ -74,7 +92,37 @@ pub fn parse_lrc(raw: &str) -> Lyrics {
     }
     lines.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
     let synced = !lines.is_empty();
-    Lyrics { lines, synced }
+    Lyrics { lines, synced, translations: Vec::new() }
+}
+
+#[test]
+fn translated_lines_match_by_index_or_nearby_timestamp() {
+    let mut lyrics=parse_lrc("[00:01.00]Original A
+[00:05.00]Original B");
+    lyrics.translations=parse_lrc("[00:01.00]翻译 A
+[00:05.00]翻译 B").lines;
+    assert_eq!(lyrics.translation_for(0),Some("翻译 A"));
+    assert_eq!(lyrics.translation_for(1),Some("翻译 B"));
+    assert_eq!(lyrics.translation_for(2),None);
+    let mut shifted=parse_lrc("[00:01.00]Original");
+    shifted.translations=parse_lrc("[00:02.00]翻译").lines;
+    assert_eq!(shifted.translation_for(0),Some("翻译"),"允许翻译时间与原文相差 1.5 秒内");
+    shifted.translations=parse_lrc("[00:09.00]翻译").lines;
+    assert_eq!(shifted.translation_for(0),None,"相差太远的翻译不能硬套到当前句");
+}
+
+#[test]
+fn translation_cache_round_trips_alongside_original() {
+    let dir=std::env::temp_dir().join(format!("daozai-lyrics-trans-{}",std::process::id()));
+    let _=std::fs::create_dir_all(&dir);
+    let path=dir.join("song.lrc");
+    let mut lyrics=parse_lrc("[00:01.00]Original");
+    lyrics.translations=parse_lrc("[00:01.00]翻译").lines;
+    write_cache(&path,&lyrics);
+    let restored=read_cache(&path).unwrap();
+    assert_eq!(restored.lines[0].text,"Original");
+    assert_eq!(restored.translation_for(0),Some("翻译"));
+    let _=std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -91,7 +139,7 @@ pub fn from_plain(raw: &str) -> Lyrics {
         .filter(|l| !l.trim().is_empty())
         .map(|l| LyricsLine { t: 0.0, text: l.trim().to_string() })
         .collect();
-    Lyrics { lines, synced: false }
+    Lyrics { lines, synced: false, translations: Vec::new() }
 }
 
 #[path="soda_cache.rs"]
@@ -176,7 +224,7 @@ fn parse_krc(raw:&str)->Lyrics {
             lines.push(LyricsLine{t:*end as f32/1000.0,text:String::new()});
         }
     }
-    Lyrics{synced:lines.iter().any(|line|!line.text.is_empty()),lines}
+    Lyrics{synced:lines.iter().any(|line|!line.text.is_empty()),lines,translations:Vec::new()}
 }
 
 pub fn fetch(track: &str, artist: &str, duration_secs: f64) -> Result<Lyrics, FetchError> {
@@ -194,15 +242,30 @@ fn cache_path(track:&str,artist:&str,duration:f64)->std::path::PathBuf {
     crate::model::config_dir().join("lyrics").join(format!("{hash:016x}.lrc"))
 }
 
+fn translation_path(path:&std::path::Path)->std::path::PathBuf {
+    path.with_extension("trans.lrc")
+}
+fn lyric_text(lines:&[LyricsLine])->String {
+    lines.iter().map(|line|format!("[{:02}:{:06.3}]{}\n",(line.t/60.0) as u32,line.t%60.0,line.text)).collect()
+}
 fn read_cache(path:&std::path::Path)->Option<Lyrics> {
-    let lyrics=parse_lrc(&std::fs::read_to_string(path).ok()?);
+    let mut lyrics=parse_lrc(&std::fs::read_to_string(path).ok()?);
+    if let Ok(raw)=std::fs::read_to_string(translation_path(path)) {
+        let translations=parse_lrc(&raw);
+        if translations.lines.iter().any(|line|!line.text.trim().is_empty()){lyrics.translations=translations.lines;}
+    }
     (lyrics.synced && lyrics.lines.iter().any(|l|!l.text.is_empty())).then_some(lyrics)
 }
 
 fn write_cache(path:&std::path::Path,lyrics:&Lyrics) {
     if let Some(parent)=path.parent(){if std::fs::create_dir_all(parent).is_err(){return;}}
-    let raw=lyrics.lines.iter().map(|line|format!("[{:02}:{:06.3}]{}\n",(line.t/60.0) as u32,line.t%60.0,line.text)).collect::<String>();
-    let _=crate::model::atomic_write(path,raw.as_bytes());
+    let _=crate::model::atomic_write(path,lyric_text(&lyrics.lines).as_bytes());
+    let translations=translation_path(path);
+    if lyrics.translations.iter().any(|line|!line.text.trim().is_empty()) {
+        let _=crate::model::atomic_write(&translations,lyric_text(&lyrics.translations).as_bytes());
+    } else {
+        let _=std::fs::remove_file(translations);
+    }
 }
 
 fn fetch_with_sources(netease:&str,lrclib:&str,track:&str,artist:&str,duration:f64)->Result<Lyrics,FetchError> {
@@ -270,8 +333,13 @@ fn fetch_netease_song(base:&str,id:u64)->Result<Lyrics,FetchError>{
     let result=request_json(&format!("{base}/api/song/lyric?id={id}&lv=-1&kv=-1&tv=-1"),base)?;
     if result.get("code").and_then(|v|v.as_i64())!=Some(200){return Err(FetchError::Unavailable("网易云取词未成功".into()));}
     let raw=result.pointer("/lrc/lyric").and_then(|v|v.as_str()).filter(|s|!s.trim().is_empty()).ok_or(FetchError::NotFound)?;
-    let lyrics=parse_lrc(raw);
-    if lyrics.synced && lyrics.lines.iter().any(|l|!l.text.is_empty()){Ok(lyrics)}else{Ok(from_plain(raw))}
+    let mut lyrics=parse_lrc(raw);
+    if !(lyrics.synced && lyrics.lines.iter().any(|l|!l.text.is_empty())){lyrics=from_plain(raw);}
+    if let Some(translated)=result.pointer("/tlyric/lyric").and_then(|v|v.as_str()) {
+        let translations=parse_lrc(translated);
+        if translations.lines.iter().any(|l|!l.text.trim().is_empty()){lyrics.translations=translations.lines;}
+    }
+    Ok(lyrics)
 }
 
 fn qq_candidates(items:&[serde_json::Value],track:&str,artist:&str,duration:f64)->Vec<String> {
@@ -296,9 +364,14 @@ fn fetch_qqmusic(base:&str,track:&str,artist:&str,duration:f64)->Result<Lyrics,F
         let result=request_json_with_retry(&format!("{base}/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid={mid}&format=json&nobase64=1"),"https://y.qq.com/",true)?;
         if result["code"].as_i64()!=Some(0){return Err(FetchError::Unavailable("QQ 音乐取词未成功".into()));}
         if let Some(raw)=result["lyric"].as_str().filter(|raw|!raw.trim().is_empty()) {
-            let lyrics=parse_lrc(raw);
+            let mut lyrics=parse_lrc(raw);
+            if let Some(translated)=result["trans"].as_str().filter(|s|!s.trim().is_empty()) {
+                let translations=parse_lrc(translated);
+                if translations.lines.iter().any(|line|!line.text.trim().is_empty()){lyrics.translations=translations.lines;}
+            }
             if lyrics.synced && lyrics.lines.iter().any(|line|!line.text.is_empty()){return Ok(lyrics);}
-            plain=Some(from_plain(raw));
+            let mut fallback=from_plain(raw);fallback.translations=lyrics.translations;
+            plain=Some(fallback);
         }
     }
     plain.ok_or(FetchError::NotFound)

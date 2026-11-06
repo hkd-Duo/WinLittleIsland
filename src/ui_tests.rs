@@ -325,8 +325,9 @@ impl H {
     }
     fn frame(&mut self, events: Vec<egui::Event>) {
         self.t += 1.0 / 60.0;
+        let scale = self.app.island_scale();
         let raw = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(crate::app::CANVAS_W, WIN_H))),
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(crate::app::CANVAS_W * scale, WIN_H * scale))),
             time: Some(self.t),
             events,
             hovered_files:self.hovered_files.clone(),
@@ -358,7 +359,7 @@ impl H {
         let file_drop_zone=&mut self.file_drop_zone;
         let output = self.ctx.run(raw, |ctx| {
             egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx, |ui| {
-                let win = Rect::from_min_size(ui.max_rect().min,Vec2::new(WIN_W,WIN_H));
+                let win = Rect::from_min_size(ui.max_rect().min,Vec2::new(WIN_W*scale,WIN_H*scale));
                 let frame=app.frame(ui, win, &env);*region=frame.region;*hit=frame.hit;*animating=frame.animating;*file_drop_zone=frame.file_drop_zone;cmds.extend(frame.cmds);
             });
         });
@@ -401,7 +402,11 @@ impl H {
         for pressed in [true,false]{self.picker_frame(vec![egui::Event::PointerButton{pos:point,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()}]);}
     }
     fn local(x: f32, y: f32) -> Pos2 {
-        Pos2::new((WIN_W - PW) / 2.0 + x, y)
+        Self::local_scaled(x, y, 1.0)
+    }
+    /// 岛体缩放为 `scale` 时，面板局部点 (x, y) 对应的窗口坐标。
+    fn local_scaled(x: f32, y: f32, scale: f32) -> Pos2 {
+        Pos2::new(((WIN_W - PW) / 2.0 + x) * scale, y * scale)
     }
     fn quota_accounts(&mut self,count:usize) {
         use crate::quota::{Account,Provider,Snapshot,Window};
@@ -832,6 +837,19 @@ fn music_lyrics_island_toggle_is_independent_and_persistent() {
 }
 
 #[test]
+fn island_lyrics_append_translation_when_available(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.island_lyrics=true;h.app.settings.lyrics_enabled=true;
+    h.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),position:7.0,duration:120.0,playing:true,..Default::default()};
+    let mut lyrics=crate::lyrics::parse_lrc("[00:05]当前歌词");
+    lyrics.translations=crate::lyrics::parse_lrc("[00:05]中文翻译").lines;
+    h.app.set_lyrics("Track","Artist",120.0,lyrics);
+    for _ in 0..60 {h.frame(vec![]);}
+    let texts:Vec<_>=h.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Text(t)=>Some(t.galley.text().to_string()),_=>None}).collect();
+    assert!(texts.iter().any(|t|t=="当前歌词") && texts.iter().any(|t|t=="中文翻译"),"岛上原文与翻译应上下同时显示：{texts:?}");
+}
+
+#[test]
 fn music_lyric_timing_follows_saved_delay_and_preserves_playback_position(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
@@ -1134,6 +1152,51 @@ fn hover_expands_with_overshoot_and_leave_collapses() {
 }
 
 #[test]
+fn collapsed_size_setting_only_affects_the_minimized_bar(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    for _ in 0..30 {h.frame(vec![]);}
+    let base=h.region.width();
+    h.app.settings.collapsed_scale=150;
+    for _ in 0..30 {h.frame(vec![]);}
+    let bigger=h.region.width();
+    assert!((bigger/base-1.5).abs()<0.05,"收起时大小应放大到 150%：{base} -> {bigger}");
+    h.app.settings.collapsed_scale=100;
+    for _ in 0..30 {h.frame(vec![]);}
+    assert!((h.region.width()/base-1.0).abs()<0.02,"恢复 100% 后应回到原大小");
+    h.app.settings.collapsed_scale=180;h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    assert!(h.app.open,"收起时放大不影响展开");
+    for _ in 0..60 {h.hover(Pos2::new(WIN_W/2.0,12.0),1.0/60.0);}
+    assert!((h.hit.width()-(PW+8.0)).abs()<1.5,"展开后使用正常岛体大小，不受收起时缩放影响：{}",h.hit.width());
+}
+
+#[test]
+fn island_size_setting_scales_the_panel_hit_region_and_expanded_height(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    assert!(h.app.open);
+    let base_hit=h.hit.width();let base_region=h.region.width();
+    assert!((base_hit-(PW+8.0)).abs()<1.0,"默认大小命中宽度应保持原值：{base_hit}");
+    assert!((base_region-(PW+crate::app::FLARE*2.0+56.0)).abs()<1.0,"默认大小裁剪区应保持原值：{base_region}");
+    // 放大到 125%：命中区、窗口裁剪区、展开高度都按比例变化。
+    h.app.settings.island_scale=125;
+    h.cursor=Some(Pos2::new(WIN_W*1.25/2.0,12.0*1.25));
+    for _ in 0..60 {h.hover(Pos2::new(WIN_W*1.25/2.0,12.0*1.25),1.0/60.0);}
+    assert!(h.app.open,"放大后光标仍应落在命中区内");
+    assert!((h.app.expanded_height()-PH*1.25).abs()<0.01,"展开高度应随岛体缩放");
+    assert!((h.hit.width()/base_hit-1.25).abs()<0.01,"命中区应随岛体缩放：{} -> {}",base_hit,h.hit.width());
+    assert!((h.region.width()/base_region-1.25).abs()<0.01,"窗口裁剪区应随岛体缩放：{} -> {}",base_region,h.region.width());
+    assert!(h.hit.contains(H::local_scaled(390.0,20.0,1.25)),"缩放后面板右侧仍可点击");
+    let outside=H::local_scaled(-8.0,20.0,1.0);
+    assert!(!h.hit.contains(outside),"缩放后原来面板外的点不应落入命中区：{outside:?}");
+    // 恢复 100%：尺寸与原点都回到默认状态。
+    h.app.settings.island_scale=100;
+    h.cursor=Some(Pos2::new(WIN_W/2.0,12.0));
+    for _ in 0..60 {h.hover(Pos2::new(WIN_W/2.0,12.0),1.0/60.0);}
+    assert!((h.hit.width()/base_hit-1.0).abs()<0.01,"恢复默认大小后命中区应复原：{} -> {}",base_hit,h.hit.width());
+    assert!((h.app.expanded_height()-PH).abs()<0.01,"恢复默认大小后展开高度应复原");
+}
+
+#[test]
 fn browser_minimal_preserves_preferences_and_restores_the_previous_mode(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.app.settings.pet=true;h.app.settings.minimal=false;h.browser_at_top=Some(true);
@@ -1299,7 +1362,7 @@ fn navigation_wraps_between_eight_pages_and_notification_settings_remain_accessi
 #[test]
 fn resident_quota_moves_left_and_releases_battery_space(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.app.settings.pet=false;
-    h.power=(Some(80),true);h.quota_accounts(1);
+    h.app.quota.config.ring=crate::quota::RingLabel::Logo;h.power=(Some(80),true);h.quota_accounts(1);
     for _ in 0..90 {h.frame(vec![]);}
     let before=h.quota_centers()[0];let width=h.app.current_width();assert!(before>WIN_W/2.0);
     h.app.settings.show_battery=false;for _ in 0..90 {h.frame(vec![]);}
@@ -1435,6 +1498,71 @@ fn quota_accounts_switch_independently_and_hide_with_the_page() {
     h.app.set_page_visible(6,false);assert!(h.app.quota_bar_indices().is_empty());assert_ne!(h.app.page,6);
     h.app.quota.config.accounts.retain(|a|a.id!="work");h.app.quota_event(crate::quota::Event{id:"work".into(),result:Ok(Default::default())});
     assert!(h.app.quota.rows["work"].is_err(),"移除账号后不得接收晚到的额度数据");
+}
+
+#[test]
+fn deepseek_balance_renders_on_the_quota_page(){
+    use crate::quota::{Account,Balance,Provider,Snapshot};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.quota.config.accounts.push(Account{id:"ds".into(),provider:Provider::DeepSeek,alias:"DeepSeek".into(),source:Default::default(),slot:Some("slot".into()),enabled:true,pinned:true});
+    h.app.quota.config.selected="ds".into();
+    h.app.quota_event(crate::quota::Event{id:"ds".into(),result:Ok(Snapshot{balance:Some(Balance{currency:"CNY".into(),total:110.0,granted:10.0,topped_up:100.0}),..Default::default()})});
+    h.app.show_page(6);
+    for _ in 0..20 {h.frame(vec![]);}
+    let texts:Vec<_>=h.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Text(t)=>Some(t.galley.text().to_string()),_=>None}).collect();
+    assert!(texts.iter().any(|t|t=="¥110.00"),"DeepSeek 余额应显示在额度页：{texts:?}");
+    assert!(texts.iter().any(|t|t.contains("充值 ¥100.00")),"应显示充值与赠送明细：{texts:?}");
+}
+
+#[test]
+fn deepseek_ring_is_drawn_while_lyrics_are_on_the_island(){
+    use crate::quota::{Account,Balance,Provider,Snapshot};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.island_lyrics=true;h.app.settings.lyrics_enabled=true;h.app.quota.config.compact=true;h.app.settings.pet=true;h.app.settings.show_battery=true;h.app.settings.island_scale=110;
+    h.app.quota.config.accounts.push(Account{id:"ds".into(),provider:Provider::DeepSeek,alias:"DeepSeek".into(),source:Default::default(),slot:Some("slot".into()),enabled:true,pinned:true});
+    h.app.quota.config.selected="ds".into();
+    h.app.quota_event(crate::quota::Event{id:"ds".into(),result:Ok(Snapshot{balance:Some(Balance{currency:"CNY".into(),total:50.88,granted:0.0,topped_up:50.88}),..Default::default()})});
+    h.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),position:7.0,duration:120.0,playing:true,..Default::default()};
+    h.app.set_lyrics("Track","Artist",120.0,crate::lyrics::parse_lrc("[00:05]当前歌词"));
+    assert_eq!(h.app.quota_bar_indices().len(),1);
+    for _ in 0..60 {h.frame(vec![]);}
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Rect(_))),"歌词模式下余额胶囊仍应绘制");
+    let texts:Vec<_>=h.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Text(t)=>Some(t.galley.text().to_string()),_=>None}).collect();
+    assert!(texts.iter().any(|t|t=="¥51"),"胶囊内应显示金额：{texts:?}");
+}
+
+#[test]
+fn two_capsules_show_two_ai_components(){
+    use crate::quota::{Account,Balance,Provider,Snapshot};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.app.settings.pet=false;
+    h.app.quota.config.accounts.push(Account{id:"cx".into(),provider:Provider::Codex,alias:"Codex".into(),source:Default::default(),slot:None,enabled:true,pinned:true});
+    h.app.quota.config.accounts.push(Account{id:"ds".into(),provider:Provider::DeepSeek,alias:"DeepSeek".into(),source:Default::default(),slot:Some("slot".into()),enabled:true,pinned:true});
+    h.app.quota.config.selected="ds".into();
+    h.app.quota_event(crate::quota::Event{id:"cx".into(),result:Ok(Snapshot{windows:vec![crate::quota::Window{label:"本周".into(),seconds:Some(604800),remaining:80.0,reset:None}],..Default::default()})});
+    h.app.quota_event(crate::quota::Event{id:"ds".into(),result:Ok(Snapshot{balance:Some(Balance{currency:"CNY".into(),total:50.88,granted:0.0,topped_up:50.88}),..Default::default()})});
+    assert_eq!(h.app.quota_bar_indices().len(),2);
+    for _ in 0..60 {h.frame(vec![]);}
+    let texts:Vec<_>=h.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Text(t)=>Some(t.galley.text().to_string()),_=>None}).collect();
+    assert!(texts.iter().any(|t|t=="80%") && texts.iter().any(|t|t=="¥51"),"两个 AI 组件应同时出现在胶囊：{texts:?}");
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Rect(_))),"胶囊背景应绘制");
+}
+
+#[test]
+fn three_pinned_quota_rings_include_a_balance_account(){
+    use crate::quota::{Account,Balance,Provider,Snapshot};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.quota.config.compact=true;
+    for (id,provider,slot) in [("codex","Codex",""),("deepseek","DeepSeek","slot"),("kimi","Kimi","")] {
+        let provider=match provider{"Codex"=>Provider::Codex,"DeepSeek"=>Provider::DeepSeek,_=>Provider::Kimi};
+        h.app.quota.config.accounts.push(Account{id:id.into(),provider,alias:id.into(),source:Default::default(),slot:(!slot.is_empty()).then(||slot.into()),enabled:true,pinned:true});
+    }
+    h.app.quota.config.selected="deepseek".into();
+    h.app.quota_event(crate::quota::Event{id:"codex".into(),result:Ok(Snapshot{windows:vec![crate::quota::Window{label:"本周".into(),seconds:Some(604800),remaining:60.0,reset:None}],..Default::default()})});
+    h.app.quota_event(crate::quota::Event{id:"deepseek".into(),result:Ok(Snapshot{balance:Some(Balance{currency:"CNY".into(),total:110.0,granted:10.0,topped_up:100.0}),..Default::default()})});
+    h.app.quota_event(crate::quota::Event{id:"kimi".into(),result:Ok(Snapshot{windows:vec![crate::quota::Window{label:"5 小时".into(),seconds:Some(18000),remaining:45.0,reset:None}],..Default::default()})});
+    assert_eq!(h.app.quota_bar_indices().len(),3,"常驻三个账号都应排进岛体");
+    for _ in 0..30 {h.frame(vec![]);}
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Circle(_) | egui::Shape::Mesh(_))),"余额账号也要画出圆环");
 }
 
 #[test]
@@ -3645,11 +3773,8 @@ fn settings_theme_follows_system_and_preserves_island_style() {
 }
 
 #[test]
-#[ignore = "按需导出关于页支持作者预览"]
-fn about_support_preview() {
+fn about_page_shows_github_link() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_SUPPORT_PREVIEW_DIR").expect("需指定预览目录"));
-    std::fs::create_dir_all(&dest).unwrap();
     let mut h=H::new();h.app.open_settings();h.app.settings_tab=9;h.ctx.set_embed_viewports(false);
     let output=std::sync::Arc::new(std::sync::Mutex::new(None));let capture=output.clone();
     egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
@@ -3659,28 +3784,32 @@ fn about_support_preview() {
         *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
     });
     let mut raster=crate::preview_raster::Raster::new(690,560);
-    for dark in [true,false] { for open in [false,true] {
+    for dark in [true,false] {
         h.app.settings.settings_theme=if dark{crate::settings_theme::SettingsTheme::Dark}else{crate::settings_theme::SettingsTheme::Light};
-        h.ctx.data_mut(|data|data.insert_temp(egui::Id::new("support-author-open"),open));
         for frame in 0..4 {
             let root=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));
             let child=output.lock().unwrap().take().unwrap();
             raster.update_textures(&root.textures_delta);raster.update_textures(&child.textures_delta);
             if frame==3 {
-                let has_wechat=child.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(text) if text.galley.text()=="微信支付"));
-                assert_eq!(has_wechat,open);
-                for label in [if open{"返回"}else{"请喝咖啡 · 支持作者"},"完全自愿 · 感谢每一份支持 · 不影响功能使用"] {
-                    let shape=child.shapes.iter().find(|shape|matches!(&shape.shape,egui::Shape::Text(text) if text.galley.text()==label)).expect("按钮和说明必须可见");
-                    assert!(shape.clip_rect.contains_rect(shape.shape.visual_bounding_rect()),"默认窗口中内容不能被裁切：{label}");
+                {
+                    let find=|label:&str|child.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t) if t.galley.text()==label=>Some((t.visual_bounding_rect(),s.clip_rect)),_=>None});
+                    let (rect,clip)=find("github.com/hkd-Duo/Daozai").expect("关于页必须直接展示 GitHub 地址");
+                    assert!(clip.contains_rect(rect),"默认窗口中 GitHub 地址不能被裁切");
+                    let (rect,clip)=find("打开 GitHub").expect("关于页需要可点击的 GitHub 入口");
+                    assert!(clip.contains_rect(rect),"默认窗口中 GitHub 按钮不能被裁切");
+                    assert!(find("微信支付").is_none()&&find("支付宝").is_none(),"关于页不再展示收款码");
                 }
-                raster.buf.fill([0.0,0.0,0.0,1.0]);
-                raster.draw(&h.ctx.tessellate(child.shapes,child.pixels_per_point),child.pixels_per_point);
-                let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
-                image::save_buffer(dest.join(format!("about-{}-{}.png",if dark{"dark"}else{"light"},if open{"open"}else{"closed"})),&rgba,690,560,image::ColorType::Rgba8).unwrap();
+                if let Some(dir)=std::env::var_os("DAOZAI_ABOUT_PREVIEW_DIR") {
+                    let dir=std::path::PathBuf::from(dir);std::fs::create_dir_all(&dir).unwrap();
+                    raster.buf.fill([0.0,0.0,0.0,1.0]);
+                    raster.draw(&h.ctx.tessellate(child.shapes,child.pixels_per_point),child.pixels_per_point);
+                    let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+                    image::save_buffer(dir.join(format!("about-{}.png",if dark{"dark"}else{"light"})),&rgba,690,560,image::ColorType::Rgba8).unwrap();
+                }
             }
             raster.free_textures(&root.textures_delta);raster.free_textures(&child.textures_delta);
         }
-    } }
+    }
 }
 
 
@@ -4030,6 +4159,20 @@ fn external_notice_respects_permissions_masks_preview_and_never_reemits(){
  h.app.settings.read_notifications=true;h.app.settings.notification_preview=true;
  h.app.receive_notification("测试".into(),"external.test".into(),"验证码 123456，请勿泄露".into());assert!(!h.app.alerts.back().unwrap().body.contains("123456"));
  h.app.tick_alerts();h.app.t+=4.6;h.app.tick_alerts();assert!(h.app.notice.is_none());
+}
+
+#[test]
+fn external_notice_shows_source_app_icon_when_available(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.frame(vec![]);
+    h.app.settings.read_notifications=true;
+    h.app.receive_notification_with_icon("测试应用".into(),"icon.test".into(),"带图标的消息".into(),Some((2,2,vec![255,0,0,255,0,255,0,255,0,0,255,255,255,255,255,255])));
+    h.app.tick_alerts();
+    assert!(h.app.notice.as_ref().is_some_and(|a|a.icon.is_some()),"通知应携带应用图标");
+    h.frame(vec![]);
+    assert!(h.app.notice_icon.is_some(),"绘制通知时应加载应用图标纹理");
+    h.app.notice=None;h.app.alerts.clear();
+    h.app.receive_notification_with_icon("测试应用".into(),"icon.bad".into(),"坏图标".into(),Some((0,0,vec![0,1,2])));
+    assert!(h.app.alerts.back().is_some_and(|a|a.icon.is_none()),"无法解码的图标应回退为纯文字");
 }
 
 #[test]

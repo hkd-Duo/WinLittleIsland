@@ -20,6 +20,8 @@ struct Shell {
     placed: bool,
     placement_at: PollClock,
     placement_scale: f32,
+    /// 当前岛体缩放；变化时同步窗口画布尺寸并重新定位。
+    island_scale: f32,
     win_x: f32,
     sys: (Option<u8>, bool, PollClock),
     #[cfg(windows)]
@@ -96,6 +98,7 @@ impl Shell {
         let initial_input=None;
         #[cfg(windows)] let system_state=daozai::system::Snapshot::default();
         #[cfg(windows)] let system_rx=daozai::system::observe(cc.egui_ctx.clone(),system_state.clone(),initial_input);
+        let island_scale=app.island_scale();
         Self {
             app,
             t0: Instant::now(),
@@ -107,6 +110,7 @@ impl Shell {
             placed: false,
             placement_at: PollClock::default(),
             placement_scale: 0.0,
+            island_scale,
             win_x: 0.0,
             sys: (None, false, PollClock::default()),
             #[cfg(windows)]
@@ -216,6 +220,16 @@ impl eframe::App for Shell {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.media_enabled.store(self.app.settings.visible_pages[0],std::sync::atomic::Ordering::Relaxed);
+        // 岛体大小变化：透明画布按比例放大/缩小，并强制重新定位；设置窗口不受影响。
+        let island_scale=self.app.island_scale();
+        if (island_scale-self.island_scale).abs()>1e-4 {
+            self.island_scale=island_scale;
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                app::CANVAS_W*island_scale,
+                app::WIN_H*island_scale,
+            )));
+            self.placement_scale=0.0;
+        }
         #[cfg(windows)]
         {
             // 用帧间隔限制刷新，绕过部分 Intel 驱动在垂直同步中的忙等待。
@@ -236,7 +250,7 @@ impl eframe::App for Shell {
             self.placement_scale=ctx.pixels_per_point();
             self.app.displays=daozai::display_layout::connected();
             let display=daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id);
-            if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(self.placement_scale,d.bounds))) {
+            if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(self.placement_scale,d.bounds,app::WIN_W*self.island_scale))) {
                 if !self.placed {diagnostics::startup("目标屏幕物理坐标定位完成，已请求显示");}
                 self.placed=true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -248,7 +262,7 @@ impl eframe::App for Shell {
         #[cfg(not(windows))]
         if !self.placed {
             if let Some(mon)=ctx.input(|i|i.viewport().monitor_size) {
-                self.placed=true;self.win_x=((mon.x-app::WIN_W)/2.0).round();
+                self.placed=true;self.win_x=((mon.x-app::WIN_W*self.island_scale)/2.0).round();
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(self.win_x,0.0)));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             }
@@ -288,7 +302,7 @@ impl eframe::App for Shell {
                 while let Ok(found)=service.rx.try_recv(){ self.bt=found; self.bt_ready=true; }
             }
             if let Some(rx)=&self.incoming {
-                while let Ok(event)=rx.try_recv(){match event {daozai::system::Incoming::Revoked=>{self.app.settings.read_notifications=false;self.app.settings.save();},daozai::system::Incoming::Status(s)=>self.app.listener_status=s,daozai::system::Incoming::Message(a,id,b)=>self.app.receive_notification(a,id,b)}}
+                while let Ok(event)=rx.try_recv(){match event {daozai::system::Incoming::Revoked=>{self.app.settings.read_notifications=false;self.app.settings.save();},daozai::system::Incoming::Status(s)=>self.app.listener_status=s,daozai::system::Incoming::Message(a,id,b,icon)=>self.app.receive_notification_with_icon(a,id,b,icon)}}
             }
         }
         if let Some(rx)=&self.seek_rx {
@@ -333,7 +347,7 @@ impl eframe::App for Shell {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(Color32::TRANSPARENT))
             .show(ctx, |ui| {
-                let win = egui::Rect::from_min_size(ui.max_rect().min,egui::vec2(app::WIN_W,app::WIN_H));
+                let win = egui::Rect::from_min_size(ui.max_rect().min,egui::vec2(app::WIN_W*island_scale,app::WIN_H*island_scale));
                 out = Some(self.app.frame(ui, win, &env));
             });
         let Some(out) = out else { return };
@@ -561,9 +575,11 @@ fn run() -> eframe::Result<()> {
         return Ok(());
     }
     diagnostics::startup("初始化图形窗口");
+    // 首帧就按用户保存的岛体大小创建画布，避免启动时先小后大的跳动。
+    let initial_scale=daozai::model::Settings::load().island_scale_factor();
     let viewport = egui::ViewportBuilder::default()
         .with_title("岛仔").with_icon(daozai::theme::app_icon())
-        .with_inner_size([app::CANVAS_W, app::WIN_H])
+        .with_inner_size([app::CANVAS_W*initial_scale, app::WIN_H*initial_scale])
         .with_decorations(false)
         .with_transparent(true)
         .with_active(false)

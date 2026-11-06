@@ -119,11 +119,12 @@ fn fill_mesh(rect:Rect,flare:f32,flare_h:f32,radius:f32,color:Color32,feather:f3
 }
 
 /// 柔和的落影：多层半透明轮廓叠加，近似高斯模糊（不依赖 GPU 模糊）。
-pub fn shadow(painter: &egui::Painter, rect: Rect, flare: f32, flare_h: f32, radius: f32, strength: f32) {
+pub fn shadow(painter: &egui::Painter, rect: Rect, flare: f32, flare_h: f32, radius: f32, strength: f32, scale: f32) {
     if strength <= 0.01 {
         return;
     }
     for (grow, a) in [(10.0f32, 0.035f32), (6.5, 0.05), (3.5, 0.07), (1.5, 0.09)] {
+        let grow = grow * scale.max(0.01);
         let r = Rect::from_min_max(
             Pos2::new(rect.left() - grow * 0.6, rect.top()),
             Pos2::new(rect.right() + grow * 0.6, rect.bottom() + grow),

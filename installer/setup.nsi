@@ -34,10 +34,12 @@ Var DesktopCheckbox
 Var AutoStartCheckbox
 Var DesktopChoice
 Var AutoStartChoice
+Var InstalledVersion
+Var UpgradeMode
 Page custom InstallPage InstallPageLeave
 !insertmacro MUI_PAGE_INSTFILES
-!define MUI_FINISHPAGE_TITLE "岛仔已安装"
-!define MUI_FINISHPAGE_TEXT "音乐、提醒和日常小事，现在都在桌面上的小岛里。"
+!define MUI_FINISHPAGE_TITLE "岛仔已就绪"
+!define MUI_FINISHPAGE_TEXT "安装或升级已完成。音乐、提醒和日常小事，现在都在桌面上的小岛里。设置和记录保持不变。"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\daozai.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "打开岛仔"
 !insertmacro MUI_PAGE_FINISH
@@ -63,8 +65,15 @@ Function .onInit
   SetRegView 64
   StrCpy $DesktopChoice 1
   StrCpy $AutoStartChoice 0
+  ; 双击安装时识别已安装版本：沿用原安装位置，并在界面上明确提示这是升级。
+  StrCpy $UpgradeMode 0
   ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "InstallLocation"
   ${If} $0 != ""
+    StrCpy $UpgradeMode 1
+    ReadRegStr $InstalledVersion HKCU "${UNINSTALL_KEY}" "DisplayVersion"
+    ${If} $InstalledVersion == ""
+      StrCpy $InstalledVersion "旧版本"
+    ${EndIf}
     IfFileExists "$DESKTOP\${APP_NAME}.lnk" +2 0
       StrCpy $DesktopChoice 0
   ${EndIf}
@@ -87,7 +96,11 @@ Function .onInit
 FunctionEnd
 
 Function InstallPage
-  !insertmacro MUI_HEADER_TEXT "欢迎使用岛仔" "Windows 顶部的桌面伙伴"
+  ${If} $UpgradeMode == 1
+    !insertmacro MUI_HEADER_TEXT "升级岛仔" "检测到已安装版本，设置和记录会保留"
+  ${Else}
+    !insertmacro MUI_HEADER_TEXT "欢迎使用岛仔" "Windows 顶部的桌面伙伴"
+  ${EndIf}
   nsDialogs::Create 1018
   Pop $0
   InitPluginsDir
@@ -101,9 +114,21 @@ Function InstallPage
   Pop $0
   CreateFont $1 "Microsoft YaHei UI" 18 700
   SendMessage $0 ${WM_SETFONT} $1 0
-  ${NSD_CreateLabel} 112u 14u 188u 14u "v${APP_VERSION} · 升级保留设置和记录"
+  ${If} $UpgradeMode == 1
+    ${If} $InstalledVersion == "${APP_VERSION}"
+      ${NSD_CreateLabel} 112u 14u 188u 14u "已安装 v$InstalledVersion（最新）· 可重新安装"
+    ${Else}
+      ${NSD_CreateLabel} 112u 14u 188u 14u "已安装 v$InstalledVersion · 将升级到 v${APP_VERSION}"
+    ${EndIf}
+  ${Else}
+    ${NSD_CreateLabel} 112u 14u 188u 14u "v${APP_VERSION} · 升级保留设置和记录"
+  ${EndIf}
   Pop $0
-  ${NSD_CreateLabel} 58u 34u 240u 20u "让重要的信息，轻轻出现在屏幕顶部。"
+  ${If} $UpgradeMode == 1
+    ${NSD_CreateLabel} 58u 34u 240u 20u "设置、待办、账号和记录都会保留"
+  ${Else}
+    ${NSD_CreateLabel} 58u 34u 240u 20u "让重要的信息，轻轻出现在屏幕顶部。"
+  ${EndIf}
   Pop $0
   ${NSD_CreateLabel} 0 58u 300u 16u "音乐歌词 · 邮件验证码 · 日程提醒 · AI 额度"
   Pop $0
@@ -121,7 +146,15 @@ Function InstallPage
   Pop $AutoStartCheckbox
   ${NSD_SetState} $AutoStartCheckbox $AutoStartChoice
   GetDlgItem $0 $HWNDPARENT 1
-  SendMessage $0 ${WM_SETTEXT} 0 "STR:一键安装"
+  ${If} $UpgradeMode == 1
+    ${If} $InstalledVersion == "${APP_VERSION}"
+      SendMessage $0 ${WM_SETTEXT} 0 "STR:重新安装"
+    ${Else}
+      SendMessage $0 ${WM_SETTEXT} 0 "STR:升级"
+    ${EndIf}
+  ${Else}
+    SendMessage $0 ${WM_SETTEXT} 0 "STR:一键安装"
+  ${EndIf}
   nsDialogs::Show
 FunctionEnd
 
