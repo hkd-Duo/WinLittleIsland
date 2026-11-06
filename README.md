@@ -13,7 +13,7 @@ WinLittleIsland（岛仔）· Windows 桌面伙伴 · 音乐与歌词 · 邮件�
 
 </div>
 
-![收起状态：贴在屏幕顶部的刘海](docs/images/showcase-hero.png)
+![WinLittleIsland 当前收起状态](docs/images/current/showcase-hero.png)
 
 ## 一个小岛，装下桌面上的小事
 

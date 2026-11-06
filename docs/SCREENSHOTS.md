@@ -26,7 +26,7 @@
 
 ### 收起状态
 
-![收起状态](images/showcase-hero.png)
+![收起状态](images/current/showcase-hero.png)
 
 ### 鼠标靠近后展开
 
