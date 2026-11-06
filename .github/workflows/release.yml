@@ -1,0 +1,106 @@
+name: 发布正式版
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（例如 v0.6.67）'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 解析版本并校验发行文件
+        id: meta
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $event = '${{ github.event_name }}'
+          $tag = ''
+          if ($event -ceq 'workflow_dispatch') {
+            $tag = '${{ inputs.tag }}'
+          } elseif ($env:GITHUB_REF -like 'refs/tags/*') {
+            $tag = $env:GITHUB_REF_NAME
+          }
+          if (-not $tag) {
+            # 分支推送：只有当前版本已经有 tag、且还没有发布过时才发布。
+            $version = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version = "([^"]+)"').Groups[1].Value
+            $tag = "v$version"
+            git fetch --tags --force --quiet origin
+            git rev-parse -q --verify "refs/tags/$tag" *> $null
+            if ($LASTEXITCODE -ne 0) { "release=false" >> $env:GITHUB_OUTPUT; "当前版本 $tag 还没有 tag，跳过发布"; exit 0 }
+            gh release view $tag *> $null
+            if ($LASTEXITCODE -eq 0) { "release=false" >> $env:GITHUB_OUTPUT; "$tag 已发布过，跳过"; exit 0 }
+          }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "无效的 tag：$tag" }
+          $version = $tag.Substring(1)
+          $cargoVersion = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version = "([^"]+)"').Groups[1].Value
+          if ($cargoVersion -ne $version) { throw "Cargo.toml 版本 $cargoVersion 与 tag $tag 不一致" }
+          $directory = Join-Path $PWD "release/$tag"
+          if (-not (Test-Path -LiteralPath $directory)) { throw "缺少发行文件目录 release/$tag" }
+          $expected = @(
+            "WinLittleIsland-Setup-$tag-x64.exe",
+            "WinLittleIsland-$tag-windows-x64.zip",
+            'SHA256SUMS.txt'
+          )
+          $actual = @(Get-ChildItem -LiteralPath $directory -File | ForEach-Object { $_.Name } | Sort-Object)
+          if (($actual -join '|') -ne (($expected | Sort-Object) -join '|')) { throw "release/$tag 文件不符合约定：$($actual -join ', ')" }
+          foreach ($line in Get-Content -LiteralPath (Join-Path $directory 'SHA256SUMS.txt')) {
+            if ($line -notmatch '^([0-9a-f]{64})  (\S+)$') { throw "SHA256SUMS.txt 格式异常：$line" }
+            $hash = $Matches[1]; $name = $Matches[2]
+            $file = Join-Path $directory $name
+            if (-not (Test-Path -LiteralPath $file)) { throw "SHA256SUMS.txt 引用了不存在的文件：$name" }
+            if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hash) { throw "文件校验失败：$name" }
+          }
+          $lines = Get-Content CHANGELOG.md
+          $start = -1
+          for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i].Trim() -ceq "## v$version") { $start = $i; break } }
+          if ($start -lt 0) { throw "CHANGELOG.md 缺少 ## v$version 段落" }
+          $body = New-Object System.Collections.Generic.List[string]
+          for ($i = $start + 1; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^## v') { break }
+            $body.Add($lines[$i])
+          }
+          $notes = ($body -join "`n").Trim()
+          if ([string]::IsNullOrWhiteSpace($notes)) { throw '发行说明为空' }
+          [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'release-notes.md'), $notes, [Text.UTF8Encoding]::new($false))
+          "release=true" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+      - name: 创建或更新 Release
+        if: steps.meta.outputs.release == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = '${{ steps.meta.outputs.tag }}'
+          $directory = Join-Path $PWD "release/$tag"
+          $assets = @(Get-ChildItem -LiteralPath $directory -File | ForEach-Object { $_.FullName })
+          $notes = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @assets --clobber
+            gh release edit $tag --title "WinLittleIsland $tag" --notes-file $notes --latest
+          } else {
+            gh release create $tag @assets --verify-tag --title "WinLittleIsland $tag" --notes-file $notes --latest
+          }
