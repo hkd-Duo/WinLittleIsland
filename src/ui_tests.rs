@@ -540,7 +540,7 @@ fn web_video_is_hidden_without_changing_music_preferences(){
     h.app.ly.lyrics=Some(crate::lyrics::parse_lrc("[00:01.00]previous song"));
     h.app.ly.error=Some(crate::lyrics::FetchError::Unavailable("503".into()));
     let (tx,rx)=std::sync::mpsc::channel();h.app.ly.rx=Some(rx);
-    h.media=crate::smtc::NowPlaying{title:"小唐的Token的抖音 - 抖音".into(),playing:true,duration:17.0,..Default::default()};
+    h.media=crate::smtc::NowPlaying{title:"示例账号的抖音 - 抖音".into(),playing:true,duration:17.0,..Default::default()};
     h.frame(vec![]);
     assert!(h.app.media.title.is_empty() && !h.app.media.playing,"视频标题和播放状态不应进入岛内音乐页面");
     assert!(h.app.ly.key.is_empty(),"视频不应建立歌曲取词任务");
@@ -563,7 +563,7 @@ fn web_video_is_hidden_without_changing_music_preferences(){
 fn web_video_does_not_override_the_minimal_island(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();h.app.settings.minimal=true;
-    h.media=crate::smtc::NowPlaying{title:"小唐的Token的抖音 - 抖音".into(),playing:true,duration:17.0,..Default::default()};
+    h.media=crate::smtc::NowPlaying{title:"示例账号的抖音 - 抖音".into(),playing:true,duration:17.0,..Default::default()};
     for _ in 0..90 {h.frame(vec![]);}
     assert!(h.region.height()<20.0,"视频不能触发歌曲专用的收起态");
 }

@@ -837,7 +837,7 @@ mod tests {
     fn media_kind_checks_video_type_before_song_metadata(){
         let mut np=NowPlaying{title:"Video title".into(),artist:"Video author".into(),playback_type:MediaKind::Video,..Default::default()};
         assert_eq!(np.kind(),MediaKind::Video);
-        np.playback_type=MediaKind::Music;np.title="小唐的Token的抖音 - 抖音".into();
+        np.playback_type=MediaKind::Music;np.title="示例账号的抖音 - 抖音".into();
         assert_eq!(np.kind(),MediaKind::Video,"浏览器错误上报音乐类型时仍应识别明确的视频标题");
         np.title="Movie - YouTube".into();assert_eq!(np.kind(),MediaKind::Video);
         np.title="阿拉斯加海湾".into();np.artist="蓝心羽".into();assert!(np.is_music());
