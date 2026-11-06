@@ -31,6 +31,20 @@ WinLittleIsland（岛仔）· Windows 桌面伙伴 · 音乐与歌词 · 邮件�
 | AI 额度 | Codex、Claude、Kimi、Grok Bot、Gemini、DeepSeek；多账号、常驻圆环、重置时间和自选配色 |
 | 系统提示 | 电源、电量、网络、音量、大写锁定、输入语言和蓝牙设备状态 |
 
+## 界面截图
+
+### 展开的音乐页面
+
+![展开的音乐页面](docs/images/current/music-page.png)
+
+### 岛上歌词、翻译与 AI 额度
+
+![岛上歌词、翻译与 AI 额度](docs/images/current/lyrics-ai-sides.png)
+
+![AI 额度圆形组件](docs/images/current/ai-components.png)
+
+更多截图见 [完整截图合集](docs/SCREENSHOTS.md)。
+
 ### 专注工作，也记得休息和喝水
 
 开始一段专注时间，在专注与休息之间切换；饮水面板记录当天进度，可以设置目标和提醒时段。
