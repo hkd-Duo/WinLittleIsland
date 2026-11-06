@@ -839,7 +839,12 @@ fn music_lyrics_island_toggle_is_independent_and_persistent() {
 #[test]
 fn island_lyrics_append_translation_when_available(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.app.settings.island_lyrics=true;h.app.settings.lyrics_enabled=true;
+    h.app.settings.island_lyrics=true;h.app.settings.lyrics_enabled=true;h.app.settings.pet=true;
+    h.app.quota.config.ring=crate::quota::RingLabel::Auto;
+    for id in ["trans-a","trans-b"]{
+        h.app.quota.config.accounts.push(crate::quota::Account{id:id.into(),provider:crate::quota::Provider::DeepSeek,alias:id.into(),source:Default::default(),slot:None,enabled:true,pinned:true});
+        h.app.quota.rows.insert(id.into(),Ok(Default::default()));
+    }
     h.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),position:7.0,duration:120.0,playing:true,..Default::default()};
     let mut lyrics=crate::lyrics::parse_lrc("[00:05]当前歌词");
     lyrics.translations=crate::lyrics::parse_lrc("[00:05]中文翻译").lines;

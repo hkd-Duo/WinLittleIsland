@@ -1070,7 +1070,7 @@ impl App {
         let s=self.island_scale()*(collapsed+(1.0-collapsed)*smoothstep(0.0,0.9,progress));
         let quota_count=self.quota_bar_indices().len();
         let ai_right=self.lyric_ai_sides().1>0;
-        let wrap=(if ai_right {LYRIC_BAR_W-80.0}else if quota_count>0 && quota_count<=2 {LYRIC_BAR_W-170.0}else{LYRIC_BAR_W-80.0}).max(90.0)*s;
+        let wrap=(if ai_right {150.0}else if quota_count>0 && quota_count<=2 {LYRIC_BAR_W-170.0}else{LYRIC_BAR_W-80.0}).max(90.0)*s;
         let align=if ai_right {egui::Align::Min}else{egui::Align::Center};
         let line_layout=|text:&str,font_size:f32,color:egui::Color32| {
             let mut job=egui::text::LayoutJob::simple(text.to_owned(),theme::font(font_size*s,W::Regular),color,wrap);
@@ -1130,6 +1130,12 @@ impl App {
     pub(crate) fn lyric_bar_width(&self)->f32 {
         let quotas=self.quota_bar_indices().len();
         let extra=if quotas>0 && quotas<=2 {quotas as f32*40.0}else{0.0};
+        if self.lyric_ai_sides().1>0 {
+            let scale=self.island_scale().max(0.1);
+            let text_w=self.island_lyric_layout.as_ref().map(|g|g.size().x/scale).unwrap_or(120.0).clamp(60.0,150.0);
+            let text_left=if self.pet_enabled(){90.0}else{45.0};
+            return text_left+text_w+21.0+self.lyric_focus_space()+extra+12.0;
+        }
         LYRIC_BAR_W+if self.pet_enabled(){48.0}else{0.0}+self.lyric_focus_space()+extra
     }
     fn notice_size(&self,a:&Alert)->(f32,f32) {
@@ -1627,7 +1633,7 @@ impl App {
             let top=center_y-total/(2.0*base.s)+(1.0-fade)*3.0;
             let (x,tx)=if right_ai==0 {
                 let x=left+content_width-LYRIC_BAR_W/2.0;(x,x)
-            }else{(left+90.0,left+90.0)};
+            }else{let x=left+if self.pet_enabled(){90.0}else{45.0};(x,x)};
             c.painter.galley(c.pos(x,top),galley,if lyric.is_some(){theme::WHITE}else{theme::GRAY});
             if let Some(translated)=translation {
                 let y=top+(original_height+gap)/base.s;

@@ -188,7 +188,18 @@ pub fn fetch_for_source(source:&str,track:&str,artist:&str,duration:f64,song_id:
     if source.eq_ignore_ascii_case("cloudmusic.exe"){
         if let Some(id)=song_id.filter(|id|*id>0){
             let path=crate::model::config_dir().join("lyrics").join(format!("netease-{id}.lrc"));
-            if let Some(lyrics)=read_cache(&path){return Ok(lyrics);}
+            if let Some(mut lyrics)=read_cache(&path){
+                // 旧缓存可能只有原文、没有翻译；补拉一次并写回 .trans.lrc。
+                if lyrics.translations.is_empty(){
+                    if let Ok(fresh)=fetch_netease_song("https://music.163.com",id){
+                        if !fresh.translations.is_empty(){
+                            lyrics.translations=fresh.translations;
+                            write_cache(&path,&lyrics);
+                        }
+                    }
+                }
+                return Ok(lyrics);
+            }
             if let Ok(lyrics)=fetch_netease_song("https://music.163.com",id){
                 if lyrics.synced{write_cache(&path,&lyrics);return Ok(lyrics);}
             }
