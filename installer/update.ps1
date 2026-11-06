@@ -30,7 +30,10 @@ try {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [IO.Compression.ZipFile]::OpenRead($archive)
     try {
-        $names = @('WinLittleIsland-v' + $version + '-windows-x64/daozai.exe', 'Daozai-v' + $version + '-windows-x64/daozai.exe')
+        $names = @(
+            ('WinLittleIsland-v' + $version + '-windows-x64/daozai.exe'),
+            ('Daozai-v' + $version + '-windows-x64/daozai.exe')
+        )
         $entries = @($zip.Entries | Where-Object {$names -contains $_.FullName.Replace('\','/')})
         if ($entries.Count -ne 1 -or $entries[0].Length -gt 200MB) { throw '更新包中缺少唯一的岛仔程序。' }
         [IO.Compression.ZipFileExtensions]::ExtractToFile($entries[0], $staged)
