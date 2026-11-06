@@ -1526,7 +1526,7 @@ fn deepseek_ring_is_drawn_while_lyrics_are_on_the_island(){
     h.app.set_lyrics("Track","Artist",120.0,crate::lyrics::parse_lrc("[00:05]当前歌词"));
     assert_eq!(h.app.quota_bar_indices().len(),1);
     for _ in 0..60 {h.frame(vec![]);}
-    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Circle(c) if (13.0..15.0).contains(&c.radius))),"歌词模式下余额圆形组件仍应绘制");
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Circle(c) if (8.5..10.2).contains(&c.radius))),"歌词模式下余额圆形组件仍应绘制");
     let texts:Vec<_>=h.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Text(t)=>Some(t.galley.text().to_string()),_=>None}).collect();
     assert!(texts.iter().any(|t|t=="¥50.88"),"组件内应显示完整金额：{texts:?}");
 }
@@ -1544,7 +1544,7 @@ fn two_capsules_show_two_ai_components(){
     for _ in 0..60 {h.frame(vec![]);}
     let texts:Vec<_>=h.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Text(t)=>Some(t.galley.text().to_string()),_=>None}).collect();
     assert!(texts.iter().any(|t|t=="80%") && texts.iter().any(|t|t=="¥50.88"),"两个 AI 组件应同时显示金额/百分比：{texts:?}");
-    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Circle(c) if (13.0..15.0).contains(&c.radius))),"两个圆形组件均应绘制");
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Circle(c) if (8.5..10.2).contains(&c.radius))),"两个圆形组件均应绘制");
 }
 
 #[test]

@@ -1217,8 +1217,8 @@ impl App {
         let capsule=!quotas.is_empty() && quotas.len()<=2 && self.quota.config.ring==crate::quota::RingLabel::Auto;
         let account_at=|i:&usize|&self.quota.config.accounts[*i];
         let left_capsules=quotas.iter().filter(|i|self.quota.config.side_of(&account_at(i).id)==crate::quota::Side::Left).count();
-        let left_widths=vec![78.0;left_capsules];
-        let right_widths=vec![78.0;quotas.len()-left_capsules];
+        let left_widths=vec![40.0;left_capsules];
+        let right_widths=vec![40.0;quotas.len()-left_capsules];
         let mut layout=if capsule {
             Layout::capsules(self.settings.show_battery&&env.battery.is_some(),&left_widths,&right_widths,self.media.is_music()&&!bell,self.pomo.running,bell,self.pet_enabled())
         } else {

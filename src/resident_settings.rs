@@ -4,7 +4,7 @@ use eframe::egui::{self,Color32,RichText,Rect,Pos2,Vec2};
 pub(crate) fn preview_layout(order:&[usize],quotas:usize)->Layout {
     let mut layout=if quotas>0 && quotas<=2 {
         // 1–2 个 AI 组件按实际圆形组件宽度排版，避免预览里和时钟/其他图标重叠。
-        let widths=vec![78.0;quotas];
+        let widths=vec![40.0;quotas];
         Layout::capsules(true,&[],&widths,true,true,false,true)
     } else {
         Layout::new(true,quotas.max(1),true,true,false,true)
