@@ -23,7 +23,7 @@ try {
     $data = Join-Path $targetDir 'settings.json'
     Set-Content -LiteralPath $data -Value 'keep-user-data'
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    foreach ($case in @('success','inherited-shell','bad-hash','wrong-version','traversal')) {
+    foreach ($case in @('success','legacy-name','inherited-shell','bad-hash','wrong-version','traversal')) {
         Remove-Item -LiteralPath (Join-Path $targetDir 'started.txt') -ErrorAction SilentlyContinue
         Set-Content -LiteralPath $target -Value 'previous-program'
         $before = (Get-FileHash -LiteralPath $target).Hash
@@ -32,7 +32,7 @@ try {
         $archive = Join-Path $work 'update.zip'
         $zip = [IO.Compression.ZipFile]::Open($archive, [IO.Compression.ZipArchiveMode]::Create)
         $version = if ($case -eq 'wrong-version') {'9.8.8'} else {'9.8.7'}
-        $entry = if ($case -eq 'traversal') {'../daozai.exe'} else {"Daozai-v$version-windows-x64/daozai.exe"}
+        $entry = if ($case -eq 'traversal') {'../daozai.exe'} elseif ($case -eq 'legacy-name') {"Daozai-v$version-windows-x64/daozai.exe"} else {"WinLittleIsland-v$version-windows-x64/daozai.exe"}
         [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $fixture, $entry) | Out-Null
         $zip.Dispose()
         Set-Content -LiteralPath (Join-Path $work 'version.txt') -Value $version
@@ -54,7 +54,7 @@ try {
             & $shell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer -WorkPath $work -TargetExe $target -ParentProcessId 0
             $code = $LASTEXITCODE
         }
-        if ($case -in @('success','inherited-shell')) {
+        if ($case -in @('success','legacy-name','inherited-shell')) {
             if ($code -ne 0) { throw "更新安装失败：$case" }
             if ((Get-FileHash -LiteralPath $target).Hash -ne (Get-FileHash -LiteralPath $fixture).Hash) { throw '未替换为新版程序' }
             for ($attempt=0; $attempt -lt 50 -and -not (Test-Path -LiteralPath (Join-Path $targetDir 'started.txt')); $attempt++) { Start-Sleep -Milliseconds 100 }

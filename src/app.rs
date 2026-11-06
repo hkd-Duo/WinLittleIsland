@@ -1030,7 +1030,7 @@ impl App {
         self.todo_input_focused=false;
     }
 
-    fn island_lyrics_active(&self)->bool {
+    pub(crate) fn island_lyrics_active(&self)->bool {
         self.settings.island_lyrics && self.settings.visible_pages[0] && self.media.is_music()
             && !self.browser_minimal_active
             && self.ly.key==format!("{}|{}|{:.0}",self.media.title,self.media.artist,self.media.duration)
@@ -1068,8 +1068,10 @@ impl App {
         let progress=anim::clamp01(self.progress());
         let collapsed=self.settings.collapsed_scale_factor();
         let s=self.island_scale()*(collapsed+(1.0-collapsed)*smoothstep(0.0,0.9,progress));
+        let quota_count=self.quota_bar_indices().len();
+        let wrap=(if quota_count>0 && quota_count<=2 {LYRIC_BAR_W-170.0}else{LYRIC_BAR_W-80.0}).max(90.0)*s;
         let line_layout=|text:&str,font_size:f32,color:egui::Color32| {
-            let mut job=egui::text::LayoutJob::simple(text.to_owned(),theme::font(font_size*s,W::Regular),color,(LYRIC_BAR_W-80.0)*s);
+            let mut job=egui::text::LayoutJob::simple(text.to_owned(),theme::font(font_size*s,W::Regular),color,wrap);
             job.halign=egui::Align::Center;
             job.wrap.break_anywhere=true;
             job.wrap.max_rows=1;
@@ -1078,7 +1080,7 @@ impl App {
         };
         if let Some(translated)=translation {
             // 原文和翻译各自一个单行 galley，分别截断，避免 max_rows 把第二行整行裁掉。
-            let mut original=egui::text::LayoutJob::simple(text,theme::font(11.0*s,W::Semibold),ink,(LYRIC_BAR_W-80.0)*s);
+            let mut original=egui::text::LayoutJob::simple(text,theme::font(11.0*s,W::Semibold),ink,wrap);
             original.halign=egui::Align::Center;
             original.wrap.break_anywhere=true;
             original.wrap.max_rows=1;
@@ -1088,7 +1090,7 @@ impl App {
             return;
         }
         let layout=|text:String| {
-            let mut job=egui::text::LayoutJob::simple(text,theme::font(11.0*s,W::Semibold),ink,(LYRIC_BAR_W-80.0)*s);
+            let mut job=egui::text::LayoutJob::simple(text,theme::font(11.0*s,W::Semibold),ink,wrap);
             job.halign=egui::Align::Center;
             job.wrap.break_anywhere=true;
             ctx.fonts(|fonts|fonts.layout_job(job))
@@ -1114,8 +1116,12 @@ impl App {
     fn effective_minimal(&self)->bool {self.settings.minimal || self.browser_minimal_active}
     pub(crate) fn pet_enabled(&self)->bool {self.settings.pet && !self.effective_minimal()}
     pub(crate) fn pet_space(&self)->f32 {if self.pet_enabled(){44.0}else{0.0}}
-    fn lyric_focus_space(&self)->f32 {if self.pomo.running{crate::focus_bar::LYRIC_WIDTH+10.0}else{0.0}}
-    fn lyric_bar_width(&self)->f32 {LYRIC_BAR_W+if self.pet_enabled(){48.0}else{0.0}+self.lyric_focus_space()}
+    pub(crate) fn lyric_focus_space(&self)->f32 {if self.pomo.running{crate::focus_bar::LYRIC_WIDTH+10.0}else{0.0}}
+    pub(crate) fn lyric_bar_width(&self)->f32 {
+        let quotas=self.quota_bar_indices().len();
+        let extra=if quotas>0 && quotas<=2 {quotas as f32*40.0}else{0.0};
+        LYRIC_BAR_W+if self.pet_enabled(){48.0}else{0.0}+self.lyric_focus_space()+extra
+    }
     fn notice_size(&self,a:&Alert)->(f32,f32) {
         let (width,height)=if a.meeting.is_some(){(360.0,136.0)}else if a.source==crate::extras::AlertSource::Internal && a.title=="蓝牙设备"{(HUD_W,48.0)}else if a.is_hud(){(HUD_W,38.0)}else{(334.0,44.0)};
         (width,height)

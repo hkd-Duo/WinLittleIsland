@@ -1,4 +1,4 @@
-﻿param([switch]$SkipBuild, [string]$Executable, [string]$NsisCompiler, [string]$OutputDirectory)
+param([switch]$SkipBuild, [string]$Executable, [string]$NsisCompiler, [string]$OutputDirectory)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
 Push-Location $projectRoot
@@ -23,7 +23,7 @@ try {
         else { $NsisCompiler = Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe' }
     }
     if (-not (Test-Path -LiteralPath $NsisCompiler)) { throw 'NSIS compiler not found; install NSIS or pass -NsisCompiler' }
-    $packageName = "Daozai-v$version-windows-x64"
+    $packageName = "WinLittleIsland-v$version-windows-x64"
     if (-not $OutputDirectory) { $OutputDirectory = Join-Path $projectRoot 'dist' }
     $outputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
     $stagingDirectory = Join-Path $outputDirectory $packageName
@@ -34,7 +34,7 @@ try {
     @('LICENSE','THIRD_PARTY_NOTICES.txt') | ForEach-Object {
         Copy-Item -LiteralPath (Join-Path $projectRoot $_) -Destination $stagingDirectory -Recurse
     }
-    $setup = Join-Path $outputDirectory "Daozai-Setup-v$version-x64.exe"
+    $setup = Join-Path $outputDirectory "WinLittleIsland-Setup-v$version-x64.exe"
     & $NsisCompiler /V2 /WX "/DAPP_VERSION=$version" "/DPROJECT_DIR=$projectRoot" "/DSOURCE_EXE=$($binary.FullName)" "/DOUTPUT_FILE=$setup" (Join-Path $projectRoot 'installer\setup.nsi')
     if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
     $archive = Join-Path $outputDirectory "$packageName.zip"

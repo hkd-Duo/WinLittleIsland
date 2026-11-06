@@ -1,5 +1,13 @@
 # 更新记录
 
+## v0.6.66
+
+- 播放歌曲时 AI 圆形组件自动移到歌词条左右两侧，并收窄歌词区域，避免金额遮挡歌词。
+- README 下载改为仓库内安装包直链，文档与链接统一到 WinLittleIsland 自有仓库。
+- 发行包改用英文名：安装包 `WinLittleIsland-Setup-v版本号-x64.exe`、便携包 `WinLittleIsland-v版本号-windows-x64.zip`；应用内更新仍兼容早期 `Daozai` 命名的更新包。
+
+可直接覆盖升级，保留现有设置和数据。
+
 ## v0.6.65
 
 - 项目迁移到独立仓库 `hkd-Duo/WinLittleIsland`，英文名统一为 WinLittleIsland；README、关于页、安装器、更新检查和版本信息同步更新。

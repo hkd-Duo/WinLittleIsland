@@ -288,16 +288,20 @@ fn check() -> Result<Option<Release>, String> {
 
 fn release_info(value: &serde_json::Value, current: &str) -> Result<Option<Release>, String> {
     let Some(tag) = parse_release(value, current)? else { return Ok(None); };
-    let name = format!("Daozai-v{}-windows-x64.zip", tag.trim_start_matches('v'));
-    let expected = format!("{REPOSITORY}/releases/download/{tag}/{name}");
-    let package = value["assets"].as_array().and_then(|assets| assets.iter().find(|asset| asset["name"] == name))
-        .and_then(|asset| {
+    let version = tag.trim_start_matches('v');
+    // 发行包使用英文名；仍兼容早期按 Daozai 命名的更新包。
+    let package = value["assets"].as_array().and_then(|assets| {
+        ["WinLittleIsland", "Daozai"].into_iter().find_map(|prefix| {
+            let name = format!("{prefix}-v{version}-windows-x64.zip");
+            let expected = format!("{REPOSITORY}/releases/download/{tag}/{name}");
+            let asset = assets.iter().find(|asset| asset["name"] == name)?;
             let hash = asset["digest"].as_str()?.strip_prefix("sha256:")?;
             let size = asset["size"].as_u64()?;
             (asset["browser_download_url"].as_str()? == expected && size > 0 && size <= 200 * 1024 * 1024
                 && hash.len() == 64 && hash.bytes().all(|c| c.is_ascii_hexdigit()))
                 .then(|| Package { url: expected, size, hash: hash.to_ascii_lowercase() })
-        });
+        })
+    });
     Ok(Some(Release { page: format!("{REPOSITORY}/releases/tag/{tag}"), version: tag,
         notes: value["body"].as_str().unwrap_or("").to_owned(), package }))
 }
@@ -464,8 +468,8 @@ mod tests {
     fn only_matching_verified_windows_package_can_install() {
         let mut value = release("v0.6.40");
         value["body"] = "更新说明".into();
-        value["assets"] = serde_json::json!([{"name":"Daozai-v0.6.40-windows-x64.zip",
-            "browser_download_url":format!("{REPOSITORY}/releases/download/v0.6.40/Daozai-v0.6.40-windows-x64.zip"),
+        value["assets"] = serde_json::json!([{"name":"WinLittleIsland-v0.6.40-windows-x64.zip",
+            "browser_download_url":format!("{REPOSITORY}/releases/download/v0.6.40/WinLittleIsland-v0.6.40-windows-x64.zip"),
             "size":123,"digest":format!("sha256:{}", "a".repeat(64))}]);
         let parsed = release_info(&value, "0.6.39").unwrap().unwrap();
         assert!(parsed.package.is_some()); assert_eq!(parsed.notes, "更新说明");
@@ -474,6 +478,12 @@ mod tests {
             let mut invalid = value.clone(); invalid["assets"][0][field] = bad;
             assert!(release_info(&invalid, "0.6.39").unwrap().unwrap().package.is_none());
         }
+        // 早期 Daozai 命名的更新包仍需能被识别。
+        let mut legacy = release("v0.6.40");
+        legacy["assets"] = serde_json::json!([{"name":"Daozai-v0.6.40-windows-x64.zip",
+            "browser_download_url":format!("{REPOSITORY}/releases/download/v0.6.40/Daozai-v0.6.40-windows-x64.zip"),
+            "size":123,"digest":format!("sha256:{}", "a".repeat(64))}]);
+        assert!(release_info(&legacy, "0.6.39").unwrap().unwrap().package.is_some());
     }
     #[test]
     fn download_rejects_truncation_corruption_excess_and_cancellation() {
