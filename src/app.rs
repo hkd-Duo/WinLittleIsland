@@ -1132,7 +1132,8 @@ impl App {
             if let Some(a)=&self.notice {let (width,height)=self.notice_size(a);return (width+self.pet_space(),height);}
         }
         if self.island_lyrics_active() {
-            (self.lyric_bar_width(),BAR_H)
+            // 额度组件要显示 Logo + 名称 + 金额，歌词条至少和常驻组件总宽一样，避免文字被裁。
+            (self.lyric_bar_width().max(self.resident.target.width),BAR_H)
         } else if self.effective_minimal()&&self.t>=self.notification_bell_until {
             (BAR_W_MIN, BAR_H_MIN)
         } else {
@@ -1216,8 +1217,8 @@ impl App {
         let capsule=!quotas.is_empty() && quotas.len()<=2 && self.quota.config.ring==crate::quota::RingLabel::Auto;
         let account_at=|i:&usize|&self.quota.config.accounts[*i];
         let left_capsules=quotas.iter().filter(|i|self.quota.config.side_of(&account_at(i).id)==crate::quota::Side::Left).count();
-        let left_widths=vec![58.0;left_capsules];
-        let right_widths=vec![58.0;quotas.len()-left_capsules];
+        let left_widths=vec![124.0;left_capsules];
+        let right_widths=vec![124.0;quotas.len()-left_capsules];
         let mut layout=if capsule {
             Layout::capsules(self.settings.show_battery&&env.battery.is_some(),&left_widths,&right_widths,self.media.is_music()&&!bell,self.pomo.running,bell,self.pet_enabled())
         } else {

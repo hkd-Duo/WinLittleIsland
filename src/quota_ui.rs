@@ -186,13 +186,24 @@ impl App {
                 let alpha=layout.pet_clearance(crate::bar_layout::QUOTA+position);
                 let faded=c.faded(alpha);let faded=if alpha<0.8{faded.ghost()}else{faded};let c=&faded;
                 let a=&self.quota.config.accounts[i];let snapshot=self.quota.rows.get(&a.id).and_then(|r|r.as_ref().ok());
-                let value=snapshot.map(|s|if let Some(b)=&s.balance{compact_money(b)}else{s.windows.first().map(|w|format!("{:.0}%",w.remaining)).unwrap_or_else(||"–".into())}).unwrap_or_else(||"–".into());
-                let width=58.0;let x=cx+layout.x[crate::bar_layout::QUOTA+position].unwrap();let left=x-width/2.0;
+                let width=124.0;let x=cx+layout.x[crate::bar_layout::QUOTA+position].unwrap();let left=x-width/2.0;
                 let colors=accent_colors(&self.quota.config,a);
-                c.fill(left,2.0,width,26.0,13.0,crate::paint::mix(colors[0],Color32::BLACK,0.82));
-                c.stroke(left,2.0,width,26.0,13.0,1.1,crate::paint::mix(colors[0],Color32::WHITE,0.18));
-                logo(c,a.provider,left+12.0,15.0,14.0);
-                c.text(left+21.0,18.8,&value,9.5,W::Semibold,theme::WHITE,H::Left);
+                let fill=crate::paint::mix(colors[0],Color32::BLACK,0.82);
+                let border=crate::paint::mix(colors[0],Color32::WHITE,0.24);
+                // 圆形 Logo 环 + 供应商名称 + 金额/百分比，参考“DeepSeek ¥42.93”的紧凑排布。
+                let ring_x=left+15.0;
+                c.circle(ring_x,15.0,14.0,fill);
+                c.ring(ring_x,15.0,13.3,1.15,border);
+                logo(c,a.provider,ring_x,15.0,13.0);
+                let name=c.fit(a.provider.name(),10.0,W::Semibold,58.0);
+                let name_x=left+32.0;
+                c.text(name_x,18.5,&name,10.0,W::Semibold,theme::WHITE,H::Left);
+                let amount=match snapshot{
+                    Some(s)=>if let Some(b)=&s.balance{money(&b.currency,b.total)}else{s.windows.first().map(|w|format!("{:.0}%",w.remaining)).unwrap_or_else(||"–".into())},
+                    None=>"–".into(),
+                };
+                let amount_x=name_x+c.text_w(&name,10.0,W::Semibold)+4.0;
+                c.text(amount_x,18.5,&amount,10.0,W::Regular,Color32::from_gray(205),H::Left);
                 let summary=snapshot.map(snapshot_summary).unwrap_or_else(||if self.quota.busy.contains(&a.id){"正在更新".into()}else{"额度暂不可用".into()});
                 if bar_tooltip(c.hit(left,1.0,width,28.0,("quota-pin",&a.id)),format!("{} · {}\n{}",a.provider.name(),a.alias,summary)).clicked(){chosen=Some(a.id.clone());}
             }
@@ -273,7 +284,7 @@ impl App {
             let mut side_changes=Vec::new();
             for (idx,a) in self.quota.config.accounts.iter_mut().enumerate(){ui.push_id(&a.id,|ui|{
                 ui.allocate_ui_with_layout(egui::vec2(ui.available_width(),30.0),egui::Layout::left_to_right(egui::Align::Center),|ui|{ui.label(egui::RichText::new(a.provider.name()).strong());ui.add_sized([150.0,25.0],egui::TextEdit::singleline(&mut a.alias).vertical_align(egui::Align::Center).hint_text("账号备注"));if a.provider==Provider::GrokBot && ui.add_enabled(self.quota.login.is_none(),egui::Button::new("重新连接").small()).clicked(){reconnect=Some(a.alias.clone());}if a.provider==Provider::Gemini && ui.add_enabled(self.quota.gemini_connecting.is_none(),egui::Button::new("重新连接").small()).clicked(){gemini_reconnect=Some((a.alias.clone(),a.slot.clone()));}if ui.add_enabled(a.provider!=Provider::Gemini || self.quota.gemini_connecting.is_none(),egui::Button::new("移除").small()).clicked(){remove=Some(a.id.clone());}});
-                ui.horizontal(|ui|{ui.checkbox(&mut a.enabled,"监控");ui.checkbox(&mut a.pinned,"常驻刘海");if ui.selectable_label(self.quota.config.selected==a.id,"当前账号").clicked(){self.quota.config.selected=a.id.clone();}ui.label("胶囊位置");for side in [quota::Side::Auto,quota::Side::Left,quota::Side::Right]{if ui.selectable_label(sides[idx]==side,side.label()).clicked(){side_changes.push((a.id.clone(),side));}}});
+                ui.horizontal(|ui|{ui.checkbox(&mut a.enabled,"监控");ui.checkbox(&mut a.pinned,"常驻刘海");if ui.selectable_label(self.quota.config.selected==a.id,"当前账号").clicked(){self.quota.config.selected=a.id.clone();}ui.label("位置");for side in [quota::Side::Auto,quota::Side::Left,quota::Side::Right]{if ui.selectable_label(sides[idx]==side,side.label()).clicked(){side_changes.push((a.id.clone(),side));}}});
                 let mut color=self.quota.config.colors.get(&a.id).copied().unwrap_or_default();color_picker(ui,a.provider,&mut color);if color==Accent::Brand{self.quota.config.colors.remove(&a.id);}else{self.quota.config.colors.insert(a.id.clone(),color);}
                 let source=if a.provider==Provider::Gemini{"Gemini 网页订阅 · Windows 加密保存".to_string()}else if a.provider==Provider::GrokBot{if a.source.as_os_str().is_empty(){"浏览器登录 · Windows 安全存储".into()}else{"Grok Bot 本机登录".into()}}else if a.provider==Provider::DeepSeek||a.provider==Provider::Glm{"API Key · Windows 安全存储".to_string()}else{a.source.to_string_lossy().into_owned()};
                 ui.label(egui::RichText::new(source).size(11.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(170),Color32::from_gray(85))));
@@ -282,7 +293,7 @@ impl App {
             for (id,side) in side_changes{if side==quota::Side::Auto{self.quota.config.sides.remove(&id);}else{self.quota.config.sides.insert(id,side);}}
             if self.quota.config.accounts.len()>1 {
                 ui.separator();
-                ui.label(egui::RichText::new("拖拽排序：决定胶囊在同一侧的左右顺序").size(11.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(170),Color32::from_gray(85))));
+                ui.label(egui::RichText::new("拖拽排序：决定圆形组件在同一侧的左右顺序").size(11.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(170),Color32::from_gray(85))));
                 let mut order_change=None;
                 ui.horizontal_wrapped(|ui|{
                     for i in 0..self.quota.config.accounts.len(){
