@@ -9,7 +9,7 @@ WinLittleIsland（岛仔）· Windows 桌面伙伴 · 音乐与歌词 · 邮件�
 
 **Windows 10 / 11** · [MIT License](LICENSE) · [GitHub Actions](https://github.com/hkd-Duo/WinLittleIsland/actions)
 
-[下载 Windows 安装版](https://github.com/hkd-Duo/WinLittleIsland/raw/main/release/v0.6.69/WinLittleIsland-Setup-v0.6.69-x64.exe) · [下载便携版](https://github.com/hkd-Duo/WinLittleIsland/raw/main/release/v0.6.69/WinLittleIsland-v0.6.69-windows-x64.zip) · [使用指南](docs/USAGE.md) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/hkd-Duo/WinLittleIsland/issues)
+[下载 Windows 安装版](https://github.com/hkd-Duo/WinLittleIsland/raw/main/release/v0.6.69/WinLittleIsland-Setup-v0.6.69-x64.exe) · [下载便携版](https://github.com/hkd-Duo/WinLittleIsland/raw/main/release/v0.6.69/WinLittleIsland-v0.6.69-windows-x64.zip) · [截图合集](docs/SCREENSHOTS.md) · [使用指南](docs/USAGE.md) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/hkd-Duo/WinLittleIsland/issues)
 
 </div>
 
@@ -58,7 +58,7 @@ WinLittleIsland（岛仔）· Windows 桌面伙伴 · 音乐与歌词 · 邮件�
 - 滚轮只滚动下方列表；大卡片保持当前选择，点击其他日程才切换详情。
 - 同一场日程使用 UID 与开始时间去重，工作日历和邮件来源可以同时标识。
 
-以上为基于演示界面制作的 AI 产品展示图，展示收起、展开与提醒状态，界面细节以实际版本为准。[查看原始界面截图](docs/images)。
+以上为基于演示界面制作的 AI 产品展示图，展示收起、展开与提醒状态，界面细节以实际版本为准。[查看完整截图合集](docs/SCREENSHOTS.md)。
 
 ## 安装与更新
 
