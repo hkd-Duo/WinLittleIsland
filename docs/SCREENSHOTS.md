@@ -14,6 +14,10 @@
 
 ![歌词、翻译与 AI logo](images/current/lyrics-ai-sides.png)
 
+### 展开的音乐页面
+
+![展开的音乐页面](images/current/music-page.png)
+
 ### WinLittleIsland 英文标识
 
 ![WinLittleIsland 英文标识](images/current/logo.png)
