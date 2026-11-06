@@ -186,24 +186,21 @@ impl App {
                 let alpha=layout.pet_clearance(crate::bar_layout::QUOTA+position);
                 let faded=c.faded(alpha);let faded=if alpha<0.8{faded.ghost()}else{faded};let c=&faded;
                 let a=&self.quota.config.accounts[i];let snapshot=self.quota.rows.get(&a.id).and_then(|r|r.as_ref().ok());
-                let width=124.0;let x=cx+layout.x[crate::bar_layout::QUOTA+position].unwrap();let left=x-width/2.0;
+                let width=78.0;let x=cx+layout.x[crate::bar_layout::QUOTA+position].unwrap();let left=x-width/2.0;
                 let colors=accent_colors(&self.quota.config,a);
                 let fill=crate::paint::mix(colors[0],Color32::BLACK,0.82);
                 let border=crate::paint::mix(colors[0],Color32::WHITE,0.24);
-                // 圆形 Logo 环 + 供应商名称 + 金额/百分比，参考“DeepSeek ¥42.93”的紧凑排布。
+                // 只保留圆形 Logo 环 + 金额/百分比，不再显示供应商文字。
                 let ring_x=left+15.0;
                 c.circle(ring_x,15.0,14.0,fill);
                 c.ring(ring_x,15.0,13.3,1.15,border);
                 logo(c,a.provider,ring_x,15.0,13.0);
-                let name=c.fit(a.provider.name(),10.0,W::Semibold,58.0);
-                let name_x=left+32.0;
-                c.text(name_x,18.5,&name,10.0,W::Semibold,theme::WHITE,H::Left);
                 let amount=match snapshot{
                     Some(s)=>if let Some(b)=&s.balance{money(&b.currency,b.total)}else{s.windows.first().map(|w|format!("{:.0}%",w.remaining)).unwrap_or_else(||"–".into())},
                     None=>"–".into(),
                 };
-                let amount_x=name_x+c.text_w(&name,10.0,W::Semibold)+4.0;
-                c.text(amount_x,18.5,&amount,10.0,W::Regular,Color32::from_gray(205),H::Left);
+                let amount=c.fit(&amount,11.0,W::Semibold,43.0);
+                c.text(left+32.0,19.0,&amount,11.0,W::Semibold,Color32::from_gray(225),H::Left);
                 let summary=snapshot.map(snapshot_summary).unwrap_or_else(||if self.quota.busy.contains(&a.id){"正在更新".into()}else{"额度暂不可用".into()});
                 if bar_tooltip(c.hit(left,1.0,width,28.0,("quota-pin",&a.id)),format!("{} · {}\n{}",a.provider.name(),a.alias,summary)).clicked(){chosen=Some(a.id.clone());}
             }
