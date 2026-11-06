@@ -85,7 +85,7 @@
 
 - AI 额度新增 DeepSeek：使用 API Key 读取账户余额（只读，不消耗额度）；Key 只保存在 Windows 凭据管理器，移除账号时一并删除。
 - 岛上歌词若歌词来源带有翻译，会在原句后直接附带翻译，并按时间戳与原文对齐。
-- 关于页改为直接展示 WinLittleIsland 的 GitHub 仓库地址，移除收款码截图。
+- 关于页改为直接展示 WinLittleIsland 的 GitHub 仓库地址。
 
 可直接覆盖升级，保留现有设置和数据。
 
