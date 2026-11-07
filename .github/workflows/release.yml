@@ -92,7 +92,8 @@ jobs:
           $event = '${{ github.event_name }}'
           $ref = '${{ github.ref }}'
           $directory = Join-Path $PWD "release/$tag"
-          $assets = @(Get-ChildItem -LiteralPath $directory -File | ForEach-Object { $_.FullName })
+          # SHA256SUMS.txt 仅保留在仓库中备查，不随 Release 上传。
+          $assets = @(Get-ChildItem -LiteralPath $directory -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' } | ForEach-Object { $_.FullName })
           $notes = Join-Path $env:RUNNER_TEMP 'release-notes.md'
           # 并发触发（推送 main 与推送 tag 同时跑）时 Release 可能已被另一条流水线创建，
           # 先尝试创建，失败则视为已存在，改为覆盖上传资产并更新说明。
