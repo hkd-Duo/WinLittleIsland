@@ -183,7 +183,7 @@ impl App {
             let left:Vec<usize>=indices.iter().copied().filter(|i|self.quota.config.side_of(&self.quota.config.accounts[*i].id)==quota::Side::Left).collect();
             let ordered:Vec<usize>=left.iter().copied().chain(indices.iter().copied().filter(|i|!left.contains(i))).collect();
             let lyric_mode=self.island_lyrics_active();
-            let (left_ai,right_ai)=self.lyric_ai_sides();
+            let (left_ai,_right_ai)=self.lyric_ai_sides();
             let content_width=self.lyric_bar_width()-self.lyric_focus_space();
             let left_edge=cx-content_width/2.0;let right_edge=cx+content_width/2.0;
             for (position,&i) in ordered.iter().enumerate(){

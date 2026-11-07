@@ -363,7 +363,7 @@ pub struct App {
     island_lyric_layout: Option<std::sync::Arc<egui::Galley>>,
     island_lyric_translation: Option<std::sync::Arc<egui::Galley>>,
     /// (原文溢出px, 翻译溢出px, 可用宽度px)；超宽时随句内播放进度横向滚动。
-    island_lyric_scroll: Option<(f32,f32,f32)>,
+    pub(crate) island_lyric_scroll: Option<(f32,f32,f32)>,
     media_anchor: (String, f64, f64, bool),
     pub(crate) media: NowPlaying,
     pub(crate) music_artwork: Option<(std::sync::Arc<egui::ColorImage>,egui::TextureHandle)>,
@@ -1101,7 +1101,6 @@ impl App {
             self.island_lyric_translation=Some(translated_galley);
             return;
         }
-        self.island_lyric_scroll=None;
         let layout=|text:String| {
             let mut job=egui::text::LayoutJob::simple(text,theme::font(11.0*s,W::Semibold),ink,wrap);
             job.halign=align;

@@ -855,6 +855,34 @@ fn island_lyrics_append_translation_when_available(){
 }
 
 #[test]
+fn island_lyric_overlong_line_scrolls_with_playback_progress(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    std::fs::create_dir_all(crate::model::config_dir()).unwrap();
+    std::fs::write(crate::model::config_dir().join("settings.txt"),"island_lyrics=1\nlyrics_enabled=1\nlyric_delay_ms=0\n").unwrap();
+    h.app.settings=crate::model::Settings::load();
+    let long="这是一句特别特别长的歌词用来验证超宽文本不再截断而是随歌曲播放进度横向滚动直到句子结尾处";
+    let mut lyrics=crate::lyrics::parse_lrc(&format!("[00:05]{long}\n[00:15]下一句"));
+    lyrics.translations=crate::lyrics::parse_lrc("[00:05]翻译第一句").lines;
+    h.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),position:5.0,duration:120.0,playing:true,..Default::default()};
+    h.app.set_lyrics("Track","Artist",120.0,lyrics);
+    for _ in 0..30 {h.frame(vec![]);}
+    assert!(h.app.island_lyric().is_some());
+    let Some((overflow_o,overflow_t,avail))=h.app.island_lyric_scroll else {panic!("超宽歌词应记录滚动信息")};
+    assert!(overflow_o>0.0,"原文超出可用宽度应产生滚动量");
+    assert_eq!(overflow_t,0.0,"短翻译不应滚动");
+    assert!(avail>0.0);
+    // 句尾：进度≈1，应基本滚到末尾；句首：从头显示。
+    h.media.position=14.5;h.frame(vec![]);
+    assert!(h.app.island_lyric_line_progress()>0.9,"句尾应滚动到底");
+    h.media.position=5.0;h.frame(vec![]);
+    assert!(h.app.island_lyric_line_progress()<0.1,"句首应从头显示");
+    // 文本 galley 应完整包含句尾文字（无省略号截断）。
+    let texts:Vec<_>=h.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Text(t)=>Some(t.galley.text().to_string()),_=>None}).collect();
+    assert!(texts.iter().any(|t|t.contains("结尾处")),"完整 galley 不应有省略号截断：{texts:?}");
+    assert!(!texts.iter().any(|t|t.ends_with("…")),"不应再出现省略号截断：{texts:?}");
+}
+
+#[test]
 fn music_lyric_timing_follows_saved_delay_and_preserves_playback_position(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
