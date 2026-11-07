@@ -1,6 +1,6 @@
 [package]
 name = "daozai"
-version = "1.3.0"
+version = "1.4.0"
 edition = "2021"
 license = "MIT"
 description = "WinLittleIsland（岛仔）：Windows 顶部的桌面伙伴与信息岛"
