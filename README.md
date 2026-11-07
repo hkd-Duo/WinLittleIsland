@@ -87,7 +87,9 @@ WinLittleIsland（岛仔）· Windows 桌面伙伴 · 音乐与歌词 · 邮件�
 
 **系统要求：** Windows 10／11 x64，支持 OpenGL 的显卡驱动。Windows 11 已进行本机实测；Windows 10、不同显卡及多显示器组合的兼容性仍需更多反馈。暂不提供 macOS、Linux 或 ARM64 成品包。
 
-**校验下载：** Release 附带 `SHA256SUMS.txt`，可用 `Get-FileHash -Algorithm SHA256` 比对。当前程序未做商业代码签名，Windows 可能提示未知发布者；请核对仓库与文件校验值后再决定运行。
+**安装提示：** 安装包未做商业代码签名，首次运行时 Windows 可能弹出「Windows 已保护你的电脑」。这是系统对未签名新程序的常规提醒，并非检测到风险：点击「更多信息」→「仍要运行」即可继续安装。便携版首次运行 `daozai.exe` 时如遇同样提示，处理方式相同。
+
+**校验下载：** 仓库内每个版本目录提供 `SHA256SUMS.txt`（当前为 [release/v1.0.0/SHA256SUMS.txt](release/v1.0.0/SHA256SUMS.txt)），可用 `Get-FileHash -Algorithm SHA256` 比对下载文件。
 
 ## 连接哪些服务
 

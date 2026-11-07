@@ -110,41 +110,45 @@ Function InstallPage
   System::Call 'user32::LoadImageW(p 0, w "$PLUGINSDIR\brand.ico", i 1, i 64, i 64, i 0x10) p .r1'
   StrCpy $BrandIcon $1
   SendMessage $0 0x170 $1 0
-  ${NSD_CreateLabel} 58u 8u 240u 22u "${APP_NAME}"
+  ${NSD_CreateLabel} 58u 4u 240u 18u "${APP_NAME}"
   Pop $0
-  CreateFont $1 "Microsoft YaHei UI" 18 700
+  CreateFont $1 "Microsoft YaHei UI" 13 700
   SendMessage $0 ${WM_SETFONT} $1 0
   ${If} $UpgradeMode == 1
     ${If} $InstalledVersion == "${APP_VERSION}"
-      ${NSD_CreateLabel} 112u 14u 188u 14u "已安装 v$InstalledVersion（最新）· 可重新安装"
+      ${NSD_CreateLabel} 58u 22u 240u 12u "已安装 v$InstalledVersion（最新）· 可重新安装"
     ${Else}
-      ${NSD_CreateLabel} 112u 14u 188u 14u "已安装 v$InstalledVersion · 将升级到 v${APP_VERSION}"
+      ${NSD_CreateLabel} 58u 22u 240u 12u "已安装 v$InstalledVersion · 将升级到 v${APP_VERSION}"
     ${EndIf}
   ${Else}
-    ${NSD_CreateLabel} 112u 14u 188u 14u "v${APP_VERSION} · 升级保留设置和记录"
+    ${NSD_CreateLabel} 58u 22u 240u 12u "v${APP_VERSION} · 升级保留设置和记录"
   ${EndIf}
   Pop $0
   ${If} $UpgradeMode == 1
-    ${NSD_CreateLabel} 58u 34u 240u 20u "设置、待办、账号和记录都会保留"
+    ${NSD_CreateLabel} 58u 34u 240u 12u "设置、待办、账号和记录都会保留"
   ${Else}
-    ${NSD_CreateLabel} 58u 34u 240u 20u "让重要的信息，轻轻出现在屏幕顶部。"
+    ${NSD_CreateLabel} 58u 34u 240u 12u "让重要的信息，轻轻出现在屏幕顶部。"
   ${EndIf}
   Pop $0
-  ${NSD_CreateLabel} 0 58u 300u 16u "音乐歌词 · 邮件验证码 · 日程提醒 · AI 额度"
+  ${NSD_CreateLabel} 0 52u 300u 12u "音乐歌词 · 邮件验证码 · 日程提醒 · AI 额度"
   Pop $0
-  ${NSD_CreateLabel} 0 80u 300u 12u "安装位置"
+  ${NSD_CreateLabel} 0 68u 300u 12u "安装位置"
   Pop $0
-  ${NSD_CreateDirRequest} 0 96u 245u 16u "$INSTDIR"
+  ${NSD_CreateDirRequest} 0 84u 245u 16u "$INSTDIR"
   Pop $PathInput
-  ${NSD_CreateBrowseButton} 250u 96u 50u 16u "浏览…"
+  ${NSD_CreateBrowseButton} 250u 84u 50u 16u "浏览…"
   Pop $0
   ${NSD_OnClick} $0 BrowseDirectory
-  ${NSD_CreateCheckbox} 0 122u 150u 14u "创建桌面快捷方式"
+  ${NSD_CreateCheckbox} 0 104u 150u 14u "创建桌面快捷方式"
   Pop $DesktopCheckbox
   ${NSD_SetState} $DesktopCheckbox $DesktopChoice
-  ${NSD_CreateCheckbox} 165u 122u 135u 14u "开机自启"
+  ${NSD_CreateCheckbox} 165u 104u 135u 14u "开机自启"
   Pop $AutoStartCheckbox
   ${NSD_SetState} $AutoStartCheckbox $AutoStartChoice
+  ${NSD_CreateLabel} 0 122u 300u 16u "小提示：若 Windows 弹出「已保护你的电脑」，点击「更多信息 → 仍要运行」即可继续安装。"
+  Pop $0
+  CreateFont $1 "Microsoft YaHei UI" 8 400
+  SendMessage $0 ${WM_SETFONT} $1 0
   GetDlgItem $0 $HWNDPARENT 1
   ${If} $UpgradeMode == 1
     ${If} $InstalledVersion == "${APP_VERSION}"
