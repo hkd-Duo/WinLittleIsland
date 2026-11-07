@@ -113,6 +113,9 @@ fn main() {
     if let Some(windres) = find_windres() {
         let out = out_dir.join("daozai-res.o");
         let status = Command::new(&windres)
+            // windres 预处理器默认用 popen 调 gcc，在部分环境下会因
+            // Bad file descriptor 失败；改用临时文件中转更稳。
+            .arg("--use-temp-file")
             .arg("--input-format=rc")
             .arg("--output-format=coff")
             .arg("-o")
