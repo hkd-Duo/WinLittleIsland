@@ -1,2 +1,0 @@
-f0602f4ec711640534e8e660142c298d6796fbc8959a4e3a26f53dc11b603d88  WinLittleIsland-Setup-v0.6.70-x64.exe
-7feb04c22ee8df12ee7e0e2cca11b4684beb891fcbe9bc68ec25f131fe7dcef6  WinLittleIsland-v0.6.70-windows-x64.zip
