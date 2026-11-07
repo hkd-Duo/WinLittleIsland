@@ -1065,6 +1065,14 @@ impl App {
                                 }
                             });
                             ui.label(egui::RichText::new("详细时段：凌晨、上午、中午、下午、傍晚、晚上").size(11.0).color(ui.visuals().weak_text_color()));
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui|{
+                                ui.add_sized([56.0,30.0],egui::Label::new("时钟秒数"));
+                                for (value,label) in [(true,"显示秒"),(false,"不显示")] {
+                                    if ui.add_sized([88.0,30.0],egui::SelectableLabel::new(self.settings.clock_seconds==value,label)).clicked(){self.settings.clock_seconds=value;}
+                                }
+                            });
+                            ui.label(egui::RichText::new("默认显示秒；关闭后时钟只显示时和分。").size(11.0).color(ui.visuals().weak_text_color()));
                             ui.separator();
                             let mut minimal=self.settings.minimal;
                             setting_row(ui,"极简刘海","收起时显示一条细线",&mut minimal);

@@ -25,7 +25,7 @@ impl crate::app::App {
         ui.add_space(12.0);
         let count=self.quota_bar_indices().len();
         let mut layout=preview_layout(&order,count);
-        if self.settings.clock_period!=0 { layout.widen_clock(40.0); }
+        if self.settings.clock_period!=0 || self.settings.clock_seconds { layout.widen_clock(40.0); }
         let (stage,_)=ui.allocate_exact_size(Vec2::new(ui.available_width(),100.0),egui::Sense::hover());
         ui.painter().rect_filled(stage,10.0,Color32::from_rgb(19,25,36));
         let scale=((stage.width()-28.0)/layout.width).min(1.0);
@@ -42,7 +42,7 @@ impl crate::app::App {
             let x=cx+layout.x[slot].unwrap();
             let quota_left=layout.x[QUOTA].map(|v|v-layout.quota_half[0]);
             let quota_right=layout.x[QUOTA+count.saturating_sub(1).min(2)].map(|v|v+layout.quota_half[count.saturating_sub(1).min(2)]);
-            let width=match slot{CLOCK=>if self.settings.clock_period!=0 {84.0}else{44.0},BATTERY=>20.0,PET=>32.0,MUSIC=>14.0,FOCUS=>crate::focus_bar::WIDTH,_=>quota_right.zip(quota_left).map(|(r,l)|r-l).unwrap_or(27.0)};
+            let width=match slot{CLOCK=>if self.settings.clock_period!=0 || self.settings.clock_seconds {84.0}else{44.0},BATTERY=>20.0,PET=>32.0,MUSIC=>14.0,FOCUS=>crate::focus_bar::WIDTH,_=>quota_right.zip(quota_left).map(|(r,l)|r-l).unwrap_or(27.0)};
             let left=if slot==QUOTA{quota_left.unwrap_or(x-13.5)}else{x-width/2.0};
             let rect=card.rect(left-5.0,1.0,width+10.0,28.0);
             let response=ui.interact(rect,ui.id().with(("resident-icon",slot)),egui::Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::Grab);

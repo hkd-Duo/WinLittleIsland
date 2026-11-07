@@ -1247,7 +1247,7 @@ impl App {
             Layout::new(self.settings.show_battery&&env.battery.is_some(),quotas.len(),self.media.is_music()&&!bell,self.pomo.running,bell,self.pet_enabled())
         };
         if !capsule {layout.reorder(&self.settings.resident_order);}
-        if self.settings.clock_period!=0 { layout.widen_clock(40.0); }
+        if self.settings.clock_period!=0 || self.settings.clock_seconds { layout.widen_clock(40.0); }
         if self.pet_enabled() {
             if let Some(a)=self.notice.as_ref().filter(|_|!self.compact_notices()&&!self.open){layout.x[bar::PET]=Some(22.0-(self.notice_size(a).0+self.pet_space())/2.0);}
             else if self.island_lyrics_active() {let (left_ai,_)=self.lyric_ai_sides();layout.x[bar::PET]=Some(60.0+left_ai as f32*40.0-self.lyric_bar_width()/2.0);} 

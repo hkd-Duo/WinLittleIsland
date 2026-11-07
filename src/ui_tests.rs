@@ -1001,7 +1001,7 @@ fn island_lyrics_center_segments_in_a_fixed_height(){
         h.app.set_lyrics("Track","Artist",120.0,crate::lyrics::parse_lrc(&format!("[00:05]{line}\n[00:15]下一句")));
         for _ in 0..90 {
             h.frame(vec![]);
-            assert!(!h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="09:41")),"切换显示段时应保持歌词布局");
+            assert!(!h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="09:41:00")),"切换显示段时应保持歌词布局");
         }
         let text=h.shapes.iter().find_map(|shape|match &shape.shape {
             egui::Shape::Text(text) if !text.galley.text().is_empty() && line.contains(text.galley.text())=>Some(text),_=>None,
@@ -1397,7 +1397,7 @@ fn resident_overflow_stays_clear_of_clock_and_opens_all_accounts(){
     let text_rect=|label:&str|h.shapes.iter().find_map(|shape|match &shape.shape{
         egui::Shape::Text(text) if text.galley.text()==label=>Some(text.visual_bounding_rect()),_=>None,
     }).expect("常驻文字应可见");
-    let more=text_rect("+2");let clock=text_rect("09:41");
+    let more=text_rect("+2");let clock=text_rect("09:41:00");
     assert!(more.right()+8.0<clock.left(),"更多账号计数不能挤占时钟");
     h.click(more.center());assert_eq!(h.app.page(),6);assert_eq!(h.app.quota.config.accounts.len(),5);
 }
@@ -1917,7 +1917,7 @@ fn mascot_stays_beside_the_clock_and_all_resident_components(){
     h.app.settings.pet=true;for _ in 0..120 {h.frame(vec![]);}
     assert!((h.app.current_width()-width-44.0).abs()<0.1,"岛仔应有独立常驻位置");
     assert_eq!(h.quota_centers().len(),3,"完整排布保留三个额度环");
-    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="09:41")),"岛仔与时钟共存");
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="09:41:00")),"岛仔与时钟共存");
     assert!(h.shapes.iter().filter(|s|matches!(&s.shape,egui::Shape::Path(p) if p.points.len()==13 && (p.stroke.width-3.6).abs()<0.01)).count()>=2,"没有闲置或悬停也应显示眼睛");
 }
 
@@ -2193,7 +2193,7 @@ fn starting_timer_keeps_lyrics_album_and_mascot_with_a_compact_countdown(){
             h.frame(vec![]);
             assert_eq!(h.app.island_lyric().map(|(_,line)|line),Some("晚风吹过了山岗"),"计时不能关闭岛上歌词");
             assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="晚风吹过了山岗" && t.galley.rows.len()==1)));
-            assert!(!h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="09:41")));
+            assert!(!h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="09:41:00")));
         }
         let texture=h.app.music_artwork.as_ref().unwrap().1.id();
         assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Rect(r) if r.brush.as_ref().is_some_and(|b|b.fill_texture_id==texture))));
@@ -3934,6 +3934,7 @@ fn clock_12h_formats_boundaries_and_persists() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
     assert!(!h.app.settings.clock_12h);
+    h.app.settings.clock_seconds=false;
     assert_eq!(h.app.settings.clock_text("23:59:00"),"23:59");
     assert_eq!(h.app.settings.clock_period,0);
     h.app.settings.clock_12h=true;
@@ -3964,9 +3965,35 @@ fn clock_12h_formats_boundaries_and_persists() {
 }
 
 #[test]
+fn clock_seconds_default_on_with_toggle_and_persists() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    assert!(h.app.settings.clock_seconds,"时钟秒数应默认开启");
+    assert_eq!(h.app.settings.clock_text("09:41:00"),"09:41:00");
+    assert_eq!(h.app.settings.clock_text("09:41"),"09:41:00","缺少秒时按 0 秒补齐");
+    h.app.settings.clock_12h=true;
+    assert_eq!(h.app.settings.clock_text("13:05:07"),"1:05:07");
+    h.app.settings.clock_12h=false;
+    h.app.settings.clock_seconds=false;
+    assert_eq!(h.app.settings.clock_text("09:41:00"),"09:41");
+    h.app.settings.clock_seconds=true;
+    h.app.settings.save();
+    assert!(crate::model::Settings::load().clock_seconds);
+    h.app.settings.clock_seconds=false;
+    h.app.settings.save();
+    let loaded=crate::model::Settings::load();
+    assert!(!loaded.clock_seconds);
+    h.app.settings.clock_seconds=true;
+    h.app.settings.save();
+    for _ in 0..10 { h.frame(vec![]); }
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="09:41:00")),"开启秒后时钟应显示 HH:MM:SS");
+}
+
+#[test]
 fn clock_period_boundaries_and_both_formats() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
+    h.app.settings.clock_seconds=false;
     for twelve in [false,true] {
         h.app.settings.clock_12h=twelve;
         h.app.settings.clock_period=2;
@@ -4267,7 +4294,7 @@ fn compact_font_atlas_preserves_settings_pixels_at_multiple_scales(){
                 raster.update_textures(&root.textures_delta);raster.update_textures(&child.textures_delta);
                 if frame==2 {
                     // 常驻预览读取真实时钟，排除跨分钟变化；固定时钟已由主界面对照覆盖。
-                    if tab==10{child.shapes.retain(|s|!matches!(&s.shape,egui::Shape::Text(t) if t.galley.text().len()==5 && t.galley.text().as_bytes()[2]==b':'));}
+                    if tab==10{child.shapes.retain(|s|!matches!(&s.shape,egui::Shape::Text(t) if matches!(t.galley.text().as_bytes(),[a,b,b':',_,_,b':',_,_] if a.is_ascii_digit()&&b.is_ascii_digit())));}
                     raster.buf.fill([0.0,0.0,0.0,1.0]);raster.draw(&h.ctx.tessellate(child.shapes,child.pixels_per_point),child.pixels_per_point);
                     let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);result.push(rgba);
                 }
