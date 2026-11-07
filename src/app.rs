@@ -362,6 +362,8 @@ pub struct App {
     pub(crate) show_lyrics: bool,
     island_lyric_layout: Option<std::sync::Arc<egui::Galley>>,
     island_lyric_translation: Option<std::sync::Arc<egui::Galley>>,
+    /// (原文溢出px, 翻译溢出px, 可用宽度px)；超宽时随句内播放进度横向滚动。
+    island_lyric_scroll: Option<(f32,f32,f32)>,
     media_anchor: (String, f64, f64, bool),
     pub(crate) media: NowPlaying,
     pub(crate) music_artwork: Option<(std::sync::Arc<egui::ColorImage>,egui::TextureHandle)>,
@@ -492,6 +494,7 @@ impl App {
             show_lyrics: initial_lyrics,
             island_lyric_layout: None,
             island_lyric_translation: None,
+            island_lyric_scroll: None,
             media_anchor: (String::new(), 0.0, 0.0, false),
             media: NowPlaying::default(),
             music_artwork: None,
@@ -1041,6 +1044,15 @@ impl App {
     /// 换句、分段和展开高亮共用时间调整；正数延后，负数提前。
     pub(crate) fn lyric_position(&self)->f32 {(self.media.position-self.settings.lyric_delay_ms as f64/1000.0)as f32}
 
+    /// 当前句内已唱进度 0..1；歌词超宽横向滚动时用它决定偏移，句首显示开头、句尾滚到末尾。
+    pub(crate) fn island_lyric_line_progress(&self)->f32 {
+        let Some((index,_))=self.island_lyric() else {return 0.0};
+        let Some(lyrics)=self.ly.lyrics.as_ref() else {return 0.0};
+        let start=lyrics.lines[index].t;
+        let end=lyrics.lines.iter().skip(index+1).find(|line|line.t>start).map_or(self.media.duration as f32,|line|line.t);
+        if end>start {((self.lyric_position()-start)/(end-start)).clamp(0.0,1.0)}else{0.0}
+    }
+
     pub(crate) fn island_lyric(&self) -> Option<(usize,&str)> {
         if !self.island_lyrics_active(){return None;}
         if self.ly.key!=format!("{}|{}|{:.0}",self.media.title,self.media.artist,self.media.duration) {return None;}
@@ -1051,8 +1063,9 @@ impl App {
     }
 
     fn update_island_lyric_layout(&mut self,ctx:&egui::Context) {
-        if !self.island_lyrics_active(){self.island_lyric_layout=None;self.island_lyric_translation=None;return;}
+        if !self.island_lyrics_active(){self.island_lyric_layout=None;self.island_lyric_translation=None;self.island_lyric_scroll=None;return;}
         self.island_lyric_translation=None;
+        self.island_lyric_scroll=None;
         let current=self.island_lyric();
         // 有翻译时原文在上、翻译在下，两行都按当前句时间实时切换；没有翻译保持单行。
         let translation=current.and_then(|(index,_)|self.ly.lyrics.as_ref().and_then(|lyrics|lyrics.translation_for(index))).map(str::to_owned);
@@ -1072,25 +1085,23 @@ impl App {
         let ai_right=self.lyric_ai_sides().1>0;
         let wrap=(if ai_right {150.0}else if quota_count>0 && quota_count<=2 {LYRIC_BAR_W-170.0}else{LYRIC_BAR_W-80.0}).max(90.0)*s;
         let align=if ai_right {egui::Align::Min}else{egui::Align::Center};
-        let line_layout=|text:&str,font_size:f32,color:egui::Color32| {
-            let mut job=egui::text::LayoutJob::simple(text.to_owned(),theme::font(font_size*s,W::Regular),color,wrap);
-            job.halign=align;
-            job.wrap.break_anywhere=true;
-            job.wrap.max_rows=1;
-            job.wrap.overflow_character=Some('…');
-            ctx.fonts(|fonts|fonts.layout_job(job))
-        };
         if let Some(translated)=translation {
-            // 原文和翻译各自一个单行 galley，分别截断，避免 max_rows 把第二行整行裁掉。
-            let mut original=egui::text::LayoutJob::simple(text,theme::font(11.0*s,W::Semibold),ink,wrap);
-            original.halign=align;
-            original.wrap.break_anywhere=true;
-            original.wrap.max_rows=1;
-            original.wrap.overflow_character=Some('…');
-            self.island_lyric_layout=Some(ctx.fonts(|fonts|fonts.layout_job(original)));
-            self.island_lyric_translation=Some(line_layout(&translated,9.5,theme::GRAY));
+            // 原文和翻译各自一个完整单行 galley；超宽时不再截断成「…」，
+            // 而是记下溢出量，绘制时随当前句的播放进度横向滚动（见 shared_header）。
+            let mut original=egui::text::LayoutJob::simple(text,theme::font(11.0*s,W::Semibold),ink,f32::INFINITY);
+            original.halign=egui::Align::Min;
+            let original_galley=ctx.fonts(|fonts|fonts.layout_job(original));
+            let mut translated_job=egui::text::LayoutJob::simple(translated,theme::font(9.5*s,W::Regular),theme::GRAY,f32::INFINITY);
+            translated_job.halign=egui::Align::Min;
+            let translated_galley=ctx.fonts(|fonts|fonts.layout_job(translated_job));
+            let overflow_o=(original_galley.size().x-wrap).max(0.0);
+            let overflow_t=(translated_galley.size().x-wrap).max(0.0);
+            self.island_lyric_scroll=Some((overflow_o,overflow_t,wrap));
+            self.island_lyric_layout=Some(original_galley);
+            self.island_lyric_translation=Some(translated_galley);
             return;
         }
+        self.island_lyric_scroll=None;
         let layout=|text:String| {
             let mut job=egui::text::LayoutJob::simple(text,theme::font(11.0*s,W::Semibold),ink,wrap);
             job.halign=align;
@@ -1634,10 +1645,28 @@ impl App {
             let (x,tx)=if right_ai==0 {
                 let x=left+content_width-LYRIC_BAR_W/2.0;(x,x)
             }else{let x=left+if self.pet_enabled(){90.0}else{45.0};(x,x)};
-            c.painter.galley(c.pos(x,top),galley,if lyric.is_some(){theme::WHITE}else{theme::GRAY});
-            if let Some(translated)=translation {
-                let y=top+(original_height+gap)/base.s;
-                c.painter.galley(c.pos(tx,y),translated,theme::GRAY);
+            let color=if lyric.is_some(){theme::WHITE}else{theme::GRAY};
+            match self.island_lyric_scroll {
+                Some((overflow_o,overflow_t,avail))=>{
+                    // 超宽的当前句随播放进度横向滚动：句首显示开头，句尾正好滚到末尾。
+                    let scrolling=overflow_o>0.5||overflow_t>0.5;
+                    let pr=if scrolling {smoothstep(0.0,1.0,self.island_lyric_line_progress())}else{0.0};
+                    let scroll_area=c.clipped(x,top-1.0,avail/base.s,total+2.0);
+                    let center_fix=|g:&egui::Galley,overflow:f32| if right_ai==0&&overflow<=0.5 {(avail-g.size().x)/2.0/base.s}else{0.0};
+                    let p=&scroll_area.painter;
+                    p.galley(c.pos(x+center_fix(&galley,overflow_o)-overflow_o*pr/base.s,top),galley.clone(),color);
+                    if let Some(translated)=&translation {
+                        let y=top+(original_height+gap)/base.s;
+                        p.galley(c.pos(tx+center_fix(translated,overflow_t)-overflow_t*pr/base.s,y),translated.clone(),theme::GRAY);
+                    }
+                }
+                None=>{
+                    c.painter.galley(c.pos(x,top),galley,color);
+                    if let Some(translated)=translation {
+                        let y=top+(original_height+gap)/base.s;
+                        c.painter.galley(c.pos(tx,y),translated,theme::GRAY);
+                    }
+                }
             }
             paint::playback_bars(&c,left+content_width-21.0-right_ai as f32*40.0,center_y,self.t,self.media.playing,theme::WHITE);
             if self.pomo.running {
