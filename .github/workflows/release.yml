@@ -94,11 +94,11 @@ jobs:
           $directory = Join-Path $PWD "release/$tag"
           $assets = @(Get-ChildItem -LiteralPath $directory -File | ForEach-Object { $_.FullName })
           $notes = Join-Path $env:RUNNER_TEMP 'release-notes.md'
-          gh release view $tag *> $null
-          if ($LASTEXITCODE -eq 0) {
-            if ($event -ceq 'push' -and $ref -like 'refs/heads/*') { "已发布过 $tag，跳过"; exit 0 }
+          # 并发触发（推送 main 与推送 tag 同时跑）时 Release 可能已被另一条流水线创建，
+          # 先尝试创建，失败则视为已存在，改为覆盖上传资产并更新说明。
+          gh release create $tag @assets --verify-tag --title "WinLittleIsland $tag" --notes-file $notes --latest
+          if ($LASTEXITCODE -ne 0) {
+            if ($event -ceq 'push' -and $ref -like 'refs/heads/*') { "已发布过 $tag，仅同步资产与说明"; }
             gh release upload $tag @assets --clobber
             gh release edit $tag --title "WinLittleIsland $tag" --notes-file $notes --latest
-          } else {
-            gh release create $tag @assets --verify-tag --title "WinLittleIsland $tag" --notes-file $notes --latest
           }
