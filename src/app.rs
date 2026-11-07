@@ -207,7 +207,8 @@ pub(crate) struct MailState {
     pub reading: Option<mail::Item>,
     pub reader_focus: bool,
     /// 已经提醒过的会议，键是 `UID + DTSTART`（邮件和日历两条来源共用）。
-    pub fired: std::collections::HashSet<String>,
+    /// 已提醒过的会议键 -> 过期时间戳（会议开始后 120 秒失效，防止长期运行无界累积）。
+    pub fired: std::collections::HashMap<String, i64>,
 }
 
 #[derive(Default)]
@@ -401,6 +402,8 @@ pub struct App {
     last_input: f64,
     system_idle: Option<f64>,
     last_cursor: Option<Pos2>,
+    /// 光标最近一次移动的时间；用于空闲时降低宠物动画帧率。
+    cursor_moved_at: f64,
     pet_a: f32,
     last_t: Option<f64>,
     pub(crate) t: f64,
@@ -505,7 +508,7 @@ impl App {
             todo_first: 0, pet: Default::default(), last_drink: None,
             toast: None, toast_below: false,
             last_input: 0.0, system_idle: None,
-            last_cursor: None,
+            last_cursor: None, cursor_moved_at: 0.0,
             pet_a: 0.0,
             last_t: None,
             t: 0.0,
@@ -1304,6 +1307,7 @@ impl App {
         if !inside {
             self.hover_lock = false;
         }
+        if env.cursor != self.last_cursor { self.cursor_moved_at = env.t; }
         if env.cursor != self.last_cursor || ctx.input(|i| !i.events.is_empty()) {
             if inside || hovering_files || ctx.input(|i| !i.events.is_empty()) {
                 self.last_input = env.t;
@@ -1500,8 +1504,16 @@ impl App {
             || self.media.playing && (self.open && self.page==0 || !self.open && !minimal_pill && self.notice.is_none() && self.media.is_music())
             || self.notice.as_ref().is_some_and(|notice|notice.meeting.is_some());
         let animating=transitioning || ambient || pet_visible && self.pet.state!=PetState::Sleeping;
-        // 交互形变保持 60 帧，媒体 30 帧；小表情 20 帧，睡眠 10 帧，静态界面每秒核对提醒。
-        let repaint_after=std::time::Duration::from_secs_f64(if transitioning{1.0/60.0}else if ambient{1.0/30.0}else if pet_visible{if self.pet.state==PetState::Sleeping{0.1}else{0.05}}else{1.0});
+        // 交互形变保持 60 帧，媒体 30 帧；宠物动画按状态降帧：光标静止（用户没在看）时
+        // Awake/静态表情降到 5 帧，打盹完全静止、睡眠只留慢速浮动，交互瞬间恢复 20 帧。
+        let pet_quiet=env.t-self.cursor_moved_at>1.5;
+        let pet_frame=match self.pet.state {
+            PetState::Sleeping=>0.5,
+            PetState::Dozing=>1.0,
+            _ if self.pet.reaction.is_some()||self.pet.state==PetState::Waking=>if pet_quiet{0.1}else{0.05},
+            _=>if pet_quiet{0.2}else{0.05},
+        };
+        let repaint_after=std::time::Duration::from_secs_f64(if transitioning{1.0/60.0}else if ambient{1.0/30.0}else if pet_visible{pet_frame}else{1.0});
         cmds.append(&mut self.pending);
         FrameOut {
             region: rel(floating_toast.map_or(region,|toast|region.union(toast)).intersect(ui.max_rect())),
@@ -1942,14 +1954,14 @@ impl App {
             let Some(at)=entry.reminder_at() else{continue;};
             let key=calendar::dedupe_key(&entry.event);
             let cutoff=if entry.event.all_day{at+60}else{entry.event.start+60};
-            if now_ts>=at && now_ts<cutoff && !self.mail.fired.contains(&key) && seen.insert(key.clone()) {
+            if now_ts>=at && now_ts<cutoff && !self.mail.fired.contains_key(&key) && seen.insert(key.clone()) {
                 picks.push((key,entry.event.clone(),"本机日程".into(),CALENDAR_PAGE));
             }
         }
         for (m,provider) in self.calendar_work_events(None) {
             let left = m.start - now_ts;
             let key = calendar::dedupe_key(m);
-            if !m.all_day && left <= lead && left > -60 && !self.mail.fired.contains(&key) && seen.insert(key.clone()) {
+            if !m.all_day && left <= lead && left > -60 && !self.mail.fired.contains_key(&key) && seen.insert(key.clone()) {
                 let source=provider.map(|provider|provider.label()).unwrap_or("日历");
                 picks.push((key, m.clone(), source.to_string(), CALENDAR_PAGE));
             }
@@ -1958,13 +1970,14 @@ impl App {
             for m in self.mail.recent.iter().filter_map(|m| m.meeting.as_ref()).filter(|m|!self.mail_event_ignored(m)) {
                 let left = m.start - now_ts;
                 let key = calendar::dedupe_key(m);
-                if !m.all_day && left <= lead && left > -60 && !self.mail.fired.contains(&key) && seen.insert(key.clone()) {
+                if !m.all_day && left <= lead && left > -60 && !self.mail.fired.contains_key(&key) && seen.insert(key.clone()) {
                     picks.push((key, m.clone(), "邮件邀请".to_string(), CALENDAR_PAGE));
                 }
             }
         }
         for (key, meeting, source, page) in picks {
-            self.mail.fired.insert(key);
+            if self.mail.fired.len()>256 { self.mail.fired.retain(|_,expires|*expires>now_ts); }
+            self.mail.fired.insert(key, meeting.start+120);
             self.meeting_alert(meeting, source, page);
         }
         self.water_ring.target = self.water.percent() / 100.0;

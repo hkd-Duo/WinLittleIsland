@@ -10,6 +10,37 @@ $staged = Join-Path $targetDir ('daozai-update-' + [Guid]::NewGuid().ToString('N
 $backup = Join-Path $workRoot 'previous.exe'
 $replaced = $false
 $exited = $false
+function Sync-Shortcuts {
+    # 同目录原子替换不改变 exe 路径，快捷方式不会失效，
+    # 但新版本的图标需要重写指向本程序的快捷方式才能立即刷新。
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $dirs = @(
+            [Environment]::GetFolderPath('Desktop'),
+            [IO.Path]::Combine($env:APPDATA, 'Microsoft\Windows\Start Menu\Programs')
+        )
+        foreach ($dir in $dirs) {
+            if (-not (Test-Path -LiteralPath $dir)) { continue }
+            foreach ($lnk in Get-ChildItem -LiteralPath $dir -Filter '*.lnk' -Recurse -ErrorAction SilentlyContinue) {
+                try {
+                    $shortcut = $shell.CreateShortcut($lnk.FullName)
+                    if ($shortcut.TargetPath -and [IO.Path]::GetFullPath($shortcut.TargetPath)) {
+                        $shortcutTarget = [IO.Path]::GetFullPath($shortcut.TargetPath)
+                        if ([string]::Equals($shortcutTarget, $target, [StringComparison]::OrdinalIgnoreCase)) {
+                            $stamp = $lnk.LastWriteTimeUtc
+                            $shortcut.Save()
+                            # 重写只为刷新图标缓存，保留原始时间戳避免改变开始菜单排序。
+                            $lnk.LastWriteTimeUtc = $stamp
+                        }
+                    }
+                } catch { }
+            }
+        }
+        # SHChangeNotify(SHCNE_ASSOCCHANGED)：让资源管理器立即重读图标缓存。
+        Add-Type -Namespace DaozaiUpdate -Name ShellNotify -MemberDefinition '[DllImport("shell32.dll")] public static extern void SHChangeNotify(int eventId, int flags, IntPtr item1, IntPtr item2);'
+        [DaozaiUpdate.ShellNotify]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero)
+    } catch { }
+}
 function Assert-PlainPath([string]$PathToCheck) {
     $ancestor = [IO.Path]::GetFullPath($PathToCheck)
     while ($ancestor) {
@@ -50,10 +81,11 @@ try {
     [IO.File]::Copy($target, $backup, $true)
     [IO.File]::Replace($staged, $target, [NullString]::Value)
     $replaced = $true
+    Sync-Shortcuts
     Start-Process -FilePath $target -WorkingDirectory $targetDir -WindowStyle Hidden
     $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Daozai'
     $registered = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
-    if ($registered -and [string]::Equals($registered.InstallLocation.TrimEnd('\'), $targetDir, [StringComparison]::OrdinalIgnoreCase)) {
+    if ($registered -and $registered.InstallLocation -and [string]::Equals(([string]$registered.InstallLocation).TrimEnd('\'), $targetDir, [StringComparison]::OrdinalIgnoreCase)) {
         Set-ItemProperty -LiteralPath $key -Name DisplayVersion -Value $version -ErrorAction SilentlyContinue
     }
     # 只清理已经确认位于专用缓存内的本次更新目录。

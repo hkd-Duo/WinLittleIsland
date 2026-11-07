@@ -598,6 +598,7 @@ pub fn spawn_poller(state: Shared,ctx:eframe::egui::Context)->Arc<std::sync::ato
                 artwork=ArtworkCache::default();
                 #[cfg(windows)] {artwork.manager=manager;}
             }
+            let playing=np.playing;
             if let Ok(mut cur) = state.lock() {
                 let changed=cur.title!=np.title || cur.artist!=np.artist || cur.playing!=np.playing
                     || cur.source!=np.source || cur.song_id!=np.song_id || cur.duration!=np.duration
@@ -605,7 +606,8 @@ pub fn spawn_poller(state: Shared,ctx:eframe::egui::Context)->Arc<std::sync::ato
                 *cur = np;
                 if changed{ctx.request_repaint();}
             }
-            std::thread::sleep(Duration::from_millis(250));
+            // 播放进度由 playback_clock 插值，轮询 500ms 足够；暂停时降到 1s。
+            std::thread::sleep(Duration::from_millis(if playing {500}else{1000}));
         }
     });
     enabled

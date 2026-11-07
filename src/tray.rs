@@ -530,17 +530,45 @@ fn run_key() -> Option<HKEY> {
     }
 }
 
-pub fn autostart_enabled() -> bool {
+/// 读取 HKCU\Run 自启动值，去掉引号后小写规范化；没有值时返回 None。
+fn autostart_value() -> Option<String> {
     unsafe {
         let mut key = HKEY::default();
         if RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_QUERY_VALUE, &mut key).0 != 0 {
-            return false;
+            return None;
         }
         let mut size = 0u32;
-        let rc = RegQueryValueExW(key, RUN_VALUE, None, None, None, Some(&mut size));
+        let mut rc = RegQueryValueExW(key, RUN_VALUE, None, None, None, Some(&mut size));
+        let mut value = None;
+        if rc.0 == 0 && size >= 4 {
+            let mut buffer = vec![0u16; (size as usize) / 2];
+            rc = RegQueryValueExW(key, RUN_VALUE, None, None, Some(buffer.as_mut_ptr() as *mut u8), Some(&mut size));
+            if rc.0 == 0 {
+                while buffer.last() == Some(&0) { buffer.pop(); }
+                value = Some(String::from_utf16_lossy(&buffer).trim().trim_matches('"').to_lowercase());
+            }
+        }
         let _ = RegCloseKey(key);
-        rc.0 == 0 && size > 0
+        value
     }
+}
+
+pub fn autostart_enabled() -> bool {
+    // 只认指向当前程序的自启动值：升级换目录后旧路径视为未开启，交给 repair_autostart 自愈。
+    match (autostart_value(), std::env::current_exe()) {
+        (Some(stored), Ok(exe)) => stored == exe.display().to_string().to_lowercase(),
+        _ => false,
+    }
+}
+
+/// 启动时调用：自启动值残留旧程序路径时静默改写为当前程序（覆盖安装/换目录自愈）。
+pub fn repair_autostart() -> bool {
+    if let (Some(stored), Ok(exe)) = (autostart_value(), std::env::current_exe()) {
+        if stored != exe.display().to_string().to_lowercase() {
+            let _ = set_autostart(true);
+        }
+    }
+    autostart_enabled()
 }
 
 pub fn set_autostart(on: bool) -> Result<(), String> {

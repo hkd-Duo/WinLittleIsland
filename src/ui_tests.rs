@@ -86,7 +86,7 @@ fn meeting_notice_can_close_without_deleting_event_or_other_reminders(){
     let mut h=H::new();h.frame(vec![]);
     let event=crate::mail::Meeting{all_day:false,title:"当前会议".into(),start:chrono::Local::now().timestamp()+600,end:None,at:String::new(),uid:"dismiss-current".into()};
     h.app.calendar.events.push(event.clone());
-    h.app.mail.fired.insert(crate::calendar::dedupe_key(&event));
+    h.app.mail.fired.insert(crate::calendar::dedupe_key(&event), i64::MAX);
     h.app.meeting_alert(event,"飞书".into(),7);
     h.app.meeting_alert(crate::mail::Meeting{all_day:false,title:"下一场会议".into(),start:chrono::Local::now().timestamp()+1200,end:None,at:String::new(),uid:"dismiss-next".into()},"钉钉".into(),7);
     for _ in 0..45{h.frame(vec![]);}

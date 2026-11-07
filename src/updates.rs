@@ -22,6 +22,8 @@ pub(crate) struct State {
     message: String,
     dialog_open: bool,
     focus_requested: bool,
+    checked_auto: bool,
+    auto: bool,
     logo: Option<egui::TextureHandle>,
 }
 
@@ -31,6 +33,19 @@ impl Drop for State {
 
 impl State {
     pub(crate) fn poll(&mut self, ctx: &egui::Context) {
+        // 每次启动静默自动检查一次更新：发现新版本会弹出详情窗口，用户可直接看到本次更新内容。
+        if !self.checked_auto && self.rx.is_none() && self.result.is_none() {
+            self.checked_auto = true;
+            self.auto = true;
+            let (tx, rx) = mpsc::channel();
+            self.rx = Some(rx);
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(6));
+                let _ = tx.send(Event::Checked(check()));
+                ctx.request_repaint();
+            });
+        }
         loop {
             let event = match self.rx.as_ref().map(|rx| rx.try_recv()) {
                 Some(Ok(event)) => event,
@@ -42,9 +57,14 @@ impl State {
             };
             match event {
                 Event::Checked(result) => {
-                    self.dialog_open = matches!(&result, Ok(Some(_)));
-                    self.focus_requested = self.dialog_open;
-                    self.result = Some(result); self.rx = None;
+                    if std::mem::take(&mut self.auto) && result.is_err() {
+                        // 启动时的自动检查失败就安静跳过，不打扰用户，等手动检查再提示。
+                        self.rx = None;
+                    } else {
+                        self.dialog_open = matches!(&result, Ok(Some(_)));
+                        self.focus_requested = self.dialog_open;
+                        self.result = Some(result); self.rx = None;
+                    }
                 }
                 Event::Progress(value) => self.progress = value,
                 Event::Failed(message) => { self.message = message; self.rx = None; self.cancel = None; }
@@ -75,7 +95,7 @@ impl State {
     pub(crate) fn ui(&mut self, ui: &mut egui::Ui) {
         if ui.add_enabled(self.rx.is_none(), egui::Button::new("检查更新")).clicked() {
             let (tx, rx) = mpsc::channel(); self.rx = Some(rx);
-            self.message.clear(); self.result = None; self.dialog_open = false;
+            self.message.clear(); self.result = None; self.dialog_open = false; self.auto = false;
             let ctx = ui.ctx().clone();
             std::thread::spawn(move || { let _ = tx.send(Event::Checked(check())); ctx.request_repaint(); });
         }

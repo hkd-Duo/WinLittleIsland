@@ -47,13 +47,18 @@ pub fn observe(ctx:eframe::egui::Context,initial:Snapshot,input:Option<crate::in
         let mut delivered=None;
         let mut sampled=crate::poll_clock::PollClock::default();
         let mut input_at=sampled;
+        let mut identity_at=sampled;
         loop {
-            let identity=crate::input::State::identity();
-            let changed=identity.map(|state|(state.context,state.layout))!=current.input.map(|state|(state.context,state.layout));
-            if changed || crate::input::switch_recent() || input_at.ready(std::time::Duration::from_secs(1)){
-                current.input=crate::input::State::read();input_at=crate::poll_clock::PollClock::now();
+            // 输入法身份查询是跨进程 COM 调用，500ms 采样足够；按键切换由 switch_recent 兜底。
+            if identity_at.ready(std::time::Duration::from_millis(500)){
+                let identity=crate::input::State::identity();
+                let changed=identity.map(|state|(state.context,state.layout))!=current.input.map(|state|(state.context,state.layout));
+                if changed || crate::input::switch_recent() || input_at.ready(std::time::Duration::from_secs(1)){
+                    current.input=crate::input::State::read();input_at=crate::poll_clock::PollClock::now();
+                }
+                identity_at=crate::poll_clock::PollClock::now();
             }
-            if sampled.ready(std::time::Duration::from_millis(500)){
+            if sampled.ready(std::time::Duration::from_millis(1000)){
                 current.system=Snapshot::read();current.fullscreen=fullscreen();sampled=crate::poll_clock::PollClock::now();
             }
             if delivered.as_ref()!=Some(&current) {

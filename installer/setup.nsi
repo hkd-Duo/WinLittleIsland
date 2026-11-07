@@ -274,6 +274,10 @@ Section "Uninstall"
   Delete "$DESKTOP\${APP_NAME}.lnk"
   Delete "$SMPROGRAMS\${APP_NAME}.lnk"
   Delete "$SMPROGRAMS\${APP_NAME}设置.lnk"
+  ; 兼容早期 install.ps1 的中文命名快捷方式：交叉安装后统一清理，避免残留失效图标。
+  Delete "$DESKTOP\岛仔.lnk"
+  Delete "$SMPROGRAMS\岛仔.lnk"
+  Delete "$SMPROGRAMS\岛仔设置.lnk"
   ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_ID}"
   ${If} $0 == '"$INSTDIR\daozai.exe"'
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_ID}"

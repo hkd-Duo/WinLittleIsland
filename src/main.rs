@@ -59,6 +59,11 @@ struct Shell {
     quota: daozai::quota::Service,
     quota_sig: Option<(bool,Vec<daozai::quota::Account>)>,
     quota_at: PollClock,
+    /// 邮件/日历/额度配置签名每秒对齐一次即可（原来每帧克隆账号列表）。
+    config_poll: PollClock,
+    /// 时钟字符串按秒缓存（env 每帧读取，避免每帧三次 format!）。
+    clock_sig: u64,
+    clock_cache: (String, String, String),
 }
 
 impl Shell {
@@ -83,7 +88,7 @@ impl Shell {
         let media_enabled=smtc::spawn_poller(media.clone(),cc.egui_ctx.clone());
         media_enabled.store(app.settings.visible_pages[0],std::sync::atomic::Ordering::Relaxed);
         #[cfg(windows)]
-        let autostart = daozai::tray::autostart_enabled();
+        let autostart = daozai::tray::repair_autostart();
         #[cfg(windows)]
         let tray = daozai::tray::Tray::start(daozai::tray::State {
             pet: app.settings.pet,
@@ -138,6 +143,7 @@ impl Shell {
             cal: daozai::calendar::Service::start(),
             cal_sig: (Vec::new(), true),
             quota: daozai::quota::Service::start(), quota_sig: None, quota_at: PollClock::default(),
+            config_poll: PollClock::default(), clock_sig: 0, clock_cache: (String::new(), String::new(), String::new()),
         }
     }
 
@@ -175,7 +181,10 @@ impl Shell {
     }
 
     fn env(&mut self, ctx: &egui::Context) -> Env {
-        let (clock, today, date) = local_now();
+        // 时钟字符串按秒缓存，避免每帧三次 format!（空闲 2 帧/秒也在分配）。
+        let clock_epoch=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        if clock_epoch!=self.clock_sig {self.clock_cache=local_now();self.clock_sig=clock_epoch;}
+        let (clock, today, date) = self.clock_cache.clone();
         // 电量变化很慢，每 5 秒读一次就够
         if self.sys.2.ready(Duration::from_secs(5)) {
             let (b, c) = read_power();
@@ -312,12 +321,17 @@ impl eframe::App for Shell {
             }
         }
         let env = self.env(ctx);
-        // v0.5.5 邮件：开关 / 间隔 / 账号清单变了就重新对齐收信线程，再把事件交给界面。
-        let sig=(self.app.settings.mail_enabled,self.app.settings.mail_interval,self.app.mail_accounts().to_vec());
-        if sig!=self.mail_sig{
-            let accounts:&[daozai::mail::Account]=if sig.0{ &sig.2 }else{ &[] };
-            self.mail.sync(accounts,sig.1);
-            self.mail_sig=sig;
+        // 邮件/日历/额度的配置快照要克隆账号列表，每秒对齐一次就够（事件接收保持每帧）。
+        let config_tick=self.config_poll.ready(std::time::Duration::from_secs(1));
+        if config_tick {self.config_poll=PollClock::now();}
+        if config_tick {
+            // v0.5.5 邮件：开关 / 间隔 / 账号清单变了就重新对齐收信线程。
+            let sig=(self.app.settings.mail_enabled,self.app.settings.mail_interval,self.app.mail_accounts().to_vec());
+            if sig!=self.mail_sig{
+                let accounts:&[daozai::mail::Account]=if sig.0{ &sig.2 }else{ &[] };
+                self.mail.sync(accounts,sig.1);
+                self.mail_sig=sig;
+            }
         }
         while let Some(ev)=self.mail.try_recv(){self.app.mail_event(ev);}
         // 日程连接或自动同步开关变化时下发给工作线程。
@@ -326,20 +340,24 @@ impl eframe::App for Shell {
         let cal_demo=std::env::var("DAOZAI_CAL_DEMO").is_ok();
         #[cfg(not(feature="record"))]
         let cal_demo=false;
-        let cal=if cal_demo{Vec::new()}else{self.app.calendar_configs()};
-        let auto_sync=self.app.settings.calendar_auto_sync;
-        if (&cal,auto_sync)!=(&self.cal_sig.0,self.cal_sig.1){
-            self.cal.configure(cal.clone(),auto_sync);
-            self.cal_sig=(cal,auto_sync);
+        if config_tick {
+            let cal=if cal_demo{Vec::new()}else{self.app.calendar_configs()};
+            let auto_sync=self.app.settings.calendar_auto_sync;
+            if (&cal,auto_sync)!=(&self.cal_sig.0,self.cal_sig.1){
+                self.cal.configure(cal.clone(),auto_sync);
+                self.cal_sig=(cal,auto_sync);
+            }
         }
         while let Some(ev)=self.cal.try_recv(){self.app.calendar_event(ev);}
         #[cfg(feature="record")] let quota_demo=std::env::var("DAOZAI_QUOTA_DEMO").is_ok();
         #[cfg(not(feature="record"))] let quota_demo=false;
         if !quota_demo {
-            let config=self.app.quota_config();let sig=(config.enabled,config.accounts.iter().cloned().map(|mut a|{a.alias.clear();a.pinned=false;a}).collect::<Vec<_>>());
-            if self.quota_sig.as_ref()!=Some(&sig) || self.quota_at.ready(Duration::from_secs(180)){
-                let accounts:Vec<_>=sig.1.iter().filter(|a|sig.0 && a.enabled).cloned().collect();
-                if self.quota.refresh(accounts.clone()){self.app.quota_pending(&accounts);self.quota_sig=Some(sig);self.quota_at=PollClock::now();}
+            if config_tick {
+                let config=self.app.quota_config();let sig=(config.enabled,config.accounts.iter().cloned().map(|mut a|{a.alias.clear();a.pinned=false;a}).collect::<Vec<_>>());
+                if self.quota_sig.as_ref()!=Some(&sig) || self.quota_at.ready(Duration::from_secs(180)){
+                    let accounts:Vec<_>=sig.1.iter().filter(|a|sig.0 && a.enabled).cloned().collect();
+                    if self.quota.refresh(accounts.clone()){self.app.quota_pending(&accounts);self.quota_sig=Some(sig);self.quota_at=PollClock::now();}
+                }
             }
             while let Some(ev)=self.quota.try_recv(){self.app.quota_event(ev);}
         }
