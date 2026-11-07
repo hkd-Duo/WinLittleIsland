@@ -13,3 +13,5 @@
 *.key
 .DS_Store
 Thumbs.db
+/.dsh/
+/.dsh-skills/
